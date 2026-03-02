@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from datetime import date
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .schemas import RefreshResponse, Sport
+from .schemas import PickSettlementPayload, RefreshResponse, Sport, StakeCreateRequest
 from .services.picks_service import PicksService
 from .storage import get_db, init_db
 
@@ -92,3 +92,60 @@ async def refresh_picks(
 
     target_date = refresh_date or date.today()
     return await service.refresh_daily_picks(db, target_date=target_date)
+
+
+@app.get(f'{settings.api_prefix}/admin/picks')
+def get_admin_picks(
+    pick_date: date | None = Query(default=None),
+    sport: Sport | None = Query(default=None),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    target_date = pick_date or date.today()
+    return {'date': target_date, 'sport': sport, 'picks': service.list_settlement_candidates(db, target_date=target_date, sport=sport)}
+
+
+@app.post(f'{settings.api_prefix}/admin/picks/{{pick_id}}/settle')
+def settle_pick(
+    pick_id: str,
+    payload: PickSettlementPayload = Body(...),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    try:
+        pick = service.settle_pick(db, pick_id=pick_id, payload=payload)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return {'success': True, 'pick': pick}
+
+
+@app.post(f'{settings.api_prefix}/stakes/create')
+def create_stake(
+    payload: StakeCreateRequest = Body(...),
+    db: Session = Depends(get_db),
+):
+    return service.create_stake(db, payload)
+
+
+@app.get(f'{settings.api_prefix}/stakes')
+def list_stakes(
+    user_id: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    return service.list_stakes(db, user_id=user_id)
+
+
+@app.post(f'{settings.api_prefix}/stakes/{{stake_id}}/withdraw')
+def withdraw_stake(
+    stake_id: str,
+    user_id: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    try:
+        return service.withdraw_stake(db, stake_id=stake_id, user_id=user_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error

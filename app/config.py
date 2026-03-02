@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     gemini_model: str = 'gemini-2.5-flash'
 
     sports_api_key: str | None = None
+    sports_provider: str = 'ESPN'  # ESPN or STUB
+    soccer_competitions: str = 'eng.1,esp.1,ger.1,ita.1,fra.1'
+    basketball_competitions: str = 'nba'
+    same_day_only: bool = True
 
     admin_refresh_key: str | None = None
 
@@ -26,6 +30,14 @@ class Settings(BaseSettings):
     cron_minute_utc: int = 0
 
     default_pick_count: int = 10
+    primary_pick_count: int = 1
+
+    xgboost_enabled: bool = True
+    xgboost_model_path: str = './models/rolley_xgb_v1.json'
+    xgboost_feature_names: str = (
+        'h2h_home_win_rate,h2h_draw_rate,h2h_away_win_rate,home_form_index,away_form_index,'
+        'urgency_score,volatility_index,injury_impact,fatigue_level,weather_impact,home_edge'
+    )
 
 
 @lru_cache

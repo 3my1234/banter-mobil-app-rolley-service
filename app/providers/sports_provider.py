@@ -33,7 +33,9 @@ class SportsDataProvider:
             if matches:
                 return matches
 
-        return self._stub_matches(sport=sport, target_date=target_date)
+        if self._settings.sports_fallback_to_stub:
+            return self._stub_matches(sport=sport, target_date=target_date)
+        return []
 
     def _fetch_espn_matches(self, *, sport: Sport, target_date: datetime) -> list[MatchCandidate]:
         date_token = target_date.strftime('%Y%m%d')

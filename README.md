@@ -40,6 +40,7 @@ EXPO_PUBLIC_ROLLEY_SERVICE_URL=http://<ip-or-domain>:8090
 Replace providers with real feeds:
 - ESPN provider is enabled by default in `app/providers/sports_provider.py`.
 - Strict same-day filtering is controlled by `SAME_DAY_ONLY=true`.
+- `SPORTS_FALLBACK_TO_STUB=false` keeps production strict (no synthetic fixtures if provider has no same-day games).
 - Gemini key in env enriches urgency/volatility features.
 - Probability engine in `app/reasoning.py` loads trained XGBoost from `XGBOOST_MODEL_PATH`.
 

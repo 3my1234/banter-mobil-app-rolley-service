@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     soccer_competitions: str = 'eng.1,esp.1,ger.1,ita.1,fra.1'
     basketball_competitions: str = 'nba'
     same_day_only: bool = True
+    sports_fallback_to_stub: bool = False
 
     admin_refresh_key: str | None = None
 

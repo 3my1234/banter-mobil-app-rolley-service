@@ -56,6 +56,7 @@ class PicksService:
 
     async def refresh_daily_picks(self, db: Session, *, target_date: date) -> RefreshResponse:
         generated = 0
+        now_utc = datetime.now(timezone.utc)
         for sport in [Sport.SOCCER, Sport.BASKETBALL]:
             matches = self._sports.fetch_matches(
                 sport=sport,
@@ -78,6 +79,13 @@ class PicksService:
 
             staged: list[tuple[PickRecord, float]] = []
             for match in matches:
+                if self._should_skip_match_for_prediction(
+                    target_date=target_date,
+                    kick_off_utc=match.kick_off_utc,
+                    now_utc=now_utc,
+                ):
+                    continue
+
                 context = await self._gemini.extract_context(match)
                 model_result = self._probability.predict(match, context)
                 decision = self._decision.decide(
@@ -119,6 +127,9 @@ class PicksService:
 
             if staged:
                 staged.sort(key=lambda item: item[0].confidence, reverse=True)
+                staged = self._filter_staged_predictions(staged=staged)
+
+            if staged:
                 primary_ids = self._select_primary_ids(staged=staged)
                 for row, _completeness in staged:
                     row.is_primary = row.id in primary_ids
@@ -464,6 +475,29 @@ class PicksService:
         adjusted_odds = 1.01 + max(0.0, min(0.08, (adjusted_confidence - 0.55) * 0.22))
         adjusted_odds = round(max(1.01, min(decision_implied_odds, adjusted_odds, 1.09)), 4)
         return adjusted_confidence, adjusted_odds
+
+    def _should_skip_match_for_prediction(
+        self,
+        *,
+        target_date: date,
+        kick_off_utc: datetime,
+        now_utc: datetime,
+    ) -> bool:
+        if not self._settings.prediction_exclude_started_matches:
+            return False
+        if target_date > now_utc.date():
+            return False
+        buffer_minutes = max(0, int(self._settings.prediction_start_buffer_minutes))
+        cutoff = now_utc + timedelta(minutes=buffer_minutes)
+        return kick_off_utc <= cutoff
+
+    def _filter_staged_predictions(self, *, staged: list[tuple[PickRecord, float]]) -> list[tuple[PickRecord, float]]:
+        min_confidence = max(0.0, min(0.99, float(self._settings.prediction_min_confidence)))
+        max_picks = max(1, int(self._settings.prediction_max_picks_per_sport))
+
+        filtered = [item for item in staged if item[0].confidence >= min_confidence]
+        filtered.sort(key=lambda item: (item[0].confidence, item[1]), reverse=True)
+        return filtered[:max_picks]
 
     def _select_primary_ids(self, *, staged: list[tuple[PickRecord, float]]) -> set[str]:
         min_completeness = max(0.0, min(1.0, float(self._settings.primary_min_completeness)))

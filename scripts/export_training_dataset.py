@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+import argparse
+import csv
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Iterable
+
+from sqlalchemy import select
+
+from app.models import MatchHistory
+from app.schemas import Sport
+from app.storage import SessionLocal, init_db
+
+
+FEATURE_NAMES = [
+    "h2h_home_win_rate",
+    "h2h_draw_rate",
+    "h2h_away_win_rate",
+    "home_form_index",
+    "away_form_index",
+    "urgency_score",
+    "volatility_index",
+    "injury_impact",
+    "fatigue_level",
+    "weather_impact",
+    "home_edge",
+]
+
+
+@dataclass
+class TeamGame:
+    kick_off_utc: datetime
+    goals_for: int
+    goals_against: int
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def recent_games(history: list[TeamGame], lookback: int) -> list[TeamGame]:
+    if lookback <= 0:
+        return history[:]
+    return history[-lookback:]
+
+
+def compute_form_index(games: Iterable[TeamGame], sport: Sport) -> float:
+    games = list(games)
+    if not games:
+        return 0.5
+    points = 0.0
+    max_points = 0.0
+    for game in games:
+        if sport == Sport.SOCCER:
+            max_points += 3
+            if game.goals_for > game.goals_against:
+                points += 3
+            elif game.goals_for == game.goals_against:
+                points += 1
+        else:
+            max_points += 1
+            if game.goals_for > game.goals_against:
+                points += 1
+    if max_points <= 0:
+        return 0.5
+    return clamp(points / max_points, 0.05, 0.95)
+
+
+def compute_volatility(games: Iterable[TeamGame], sport: Sport) -> float:
+    games = list(games)
+    if not games:
+        return 0.5
+    avg_abs_margin = sum(abs(g.goals_for - g.goals_against) for g in games) / len(games)
+    normalizer = 5.0 if sport == Sport.SOCCER else 15.0
+    return clamp(avg_abs_margin / normalizer, 0.05, 0.95)
+
+
+def compute_fatigue(games: Iterable[TeamGame], reference: datetime) -> float:
+    games = list(games)
+    if not games:
+        return 0.1
+    window_start = reference - timedelta(days=7)
+    recent_count = sum(1 for game in games if game.kick_off_utc >= window_start)
+    return clamp(recent_count / 7.0, 0.05, 0.95)
+
+
+def compute_h2h(
+    h2h_rows: list[tuple[str, str, int, int]],
+    current_home_team: str,
+    sport: Sport,
+) -> tuple[float, float, float]:
+    if not h2h_rows:
+        # fallback to neutral h2h when no prior pair history exists
+        if sport == Sport.BASKETBALL:
+            return 0.5, 0.01, 0.49
+        return 0.42, 0.18, 0.40
+
+    home_wins = 0
+    away_wins = 0
+    draws = 0
+    for home_team, away_team, home_score, away_score in h2h_rows:
+        if home_score == away_score:
+            draws += 1
+            continue
+        winner = home_team if home_score > away_score else away_team
+        if winner == current_home_team:
+            home_wins += 1
+        else:
+            away_wins += 1
+
+    total = max(1, home_wins + away_wins + draws)
+    if sport == Sport.BASKETBALL:
+        draw_rate = 0.01
+        home_rate = clamp(home_wins / total, 0.05, 0.95)
+        away_rate = clamp(away_wins / total, 0.04, 0.95)
+        remap = max(home_rate + away_rate, 0.01)
+        return home_rate / remap, draw_rate, away_rate / remap
+    return (
+        clamp(home_wins / total, 0.08, 0.9),
+        clamp(draws / total, 0.05, 0.45),
+        clamp(away_wins / total, 0.05, 0.9),
+    )
+
+
+def target_class_for_match(sport: Sport, home_score: int, away_score: int) -> int:
+    if sport == Sport.BASKETBALL:
+        return 7 if home_score >= away_score else 8
+
+    # Soccer: favor safer markets first, then directional outcomes.
+    total_goals = home_score + away_score
+    margin = home_score - away_score
+    if total_goals >= 3:
+        return 4  # over 1.5
+    if total_goals >= 1:
+        return 3  # over 0.5
+    if margin >= 2:
+        return 5  # home +1.5
+    if margin <= -2:
+        return 6  # away +1.5
+    if margin > 0:
+        return 0
+    if margin == 0:
+        return 1
+    return 2
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Export historical training CSV from rolley_match_history.")
+    parser.add_argument("--output", default="data/historical_training.csv", help="Output CSV path")
+    parser.add_argument("--lookback", type=int, default=12, help="Recent match window per team")
+    parser.add_argument("--min-team-games", type=int, default=5, help="Minimum prior games per team")
+    parser.add_argument("--sports", default="SOCCER,BASKETBALL", help="Comma-separated sports subset")
+    args = parser.parse_args()
+
+    selected_sports = {token.strip().upper() for token in args.sports.split(",") if token.strip()}
+    if not selected_sports:
+        selected_sports = {Sport.SOCCER.value, Sport.BASKETBALL.value}
+
+    init_db()
+    db = SessionLocal()
+    try:
+        rows = db.scalars(select(MatchHistory).order_by(MatchHistory.kick_off_utc.asc())).all()
+    finally:
+        db.close()
+
+    team_history: dict[tuple[str, str], list[TeamGame]] = defaultdict(list)
+    h2h_history: dict[tuple[str, str, str], list[tuple[str, str, int, int]]] = defaultdict(list)
+
+    output_rows: list[dict[str, float | int]] = []
+
+    for row in rows:
+        if row.sport not in selected_sports:
+            continue
+
+        sport = Sport(row.sport)
+        home_key = (row.sport, row.home_team)
+        away_key = (row.sport, row.away_team)
+        pair_key = (row.sport, min(row.home_team, row.away_team), max(row.home_team, row.away_team))
+
+        home_prior = recent_games(team_history[home_key], args.lookback)
+        away_prior = recent_games(team_history[away_key], args.lookback)
+        pair_prior = h2h_history[pair_key][-args.lookback :] if args.lookback > 0 else h2h_history[pair_key]
+
+        if len(home_prior) >= args.min_team_games and len(away_prior) >= args.min_team_games:
+            home_form = compute_form_index(home_prior, sport)
+            away_form = compute_form_index(away_prior, sport)
+            home_vol = compute_volatility(home_prior, sport)
+            away_vol = compute_volatility(away_prior, sport)
+            fatigue = max(
+                compute_fatigue(home_prior, row.kick_off_utc),
+                compute_fatigue(away_prior, row.kick_off_utc),
+            )
+            volatility_index = clamp(((home_vol + away_vol) / 2) * 10, 0.5, 10.0)
+            urgency_score = clamp((4.0 + abs(home_form - away_form) * 8.0), 0.5, 10.0)
+            injury_impact = clamp((fatigue * 5.0 + ((home_vol + away_vol) / 2) * 2.0), 0.0, 10.0)
+            weather_impact = clamp((2.0 + home_vol * 1.5) if sport == Sport.SOCCER else 1.0, 0.0, 10.0)
+
+            h2h_home, h2h_draw, h2h_away = compute_h2h(pair_prior, row.home_team, sport)
+            home_edge = home_form - away_form
+            target_class = target_class_for_match(sport, row.home_score, row.away_score)
+
+            output_rows.append(
+                {
+                    "h2h_home_win_rate": round(h2h_home, 6),
+                    "h2h_draw_rate": round(h2h_draw, 6),
+                    "h2h_away_win_rate": round(h2h_away, 6),
+                    "home_form_index": round(home_form, 6),
+                    "away_form_index": round(away_form, 6),
+                    "urgency_score": round(urgency_score / 10, 6),
+                    "volatility_index": round(volatility_index / 10, 6),
+                    "injury_impact": round(injury_impact / 10, 6),
+                    "fatigue_level": round(fatigue, 6),
+                    "weather_impact": round(weather_impact / 10, 6),
+                    "home_edge": round(home_edge, 6),
+                    "target_class": target_class,
+                }
+            )
+
+        team_history[home_key].append(
+            TeamGame(
+                kick_off_utc=row.kick_off_utc,
+                goals_for=row.home_score,
+                goals_against=row.away_score,
+            )
+        )
+        team_history[away_key].append(
+            TeamGame(
+                kick_off_utc=row.kick_off_utc,
+                goals_for=row.away_score,
+                goals_against=row.home_score,
+            )
+        )
+        h2h_history[pair_key].append((row.home_team, row.away_team, row.home_score, row.away_score))
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=[*FEATURE_NAMES, "target_class"])
+        writer.writeheader()
+        writer.writerows(output_rows)
+
+    print(f"Exported {len(output_rows)} rows to {output_path}")
+
+
+if __name__ == "__main__":
+    main()
+

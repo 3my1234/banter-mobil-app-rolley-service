@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     default_pick_count: int = 10
     primary_pick_count: int = 1
     primary_min_completeness: float = 0.65
+    prediction_min_confidence: float = 0.90
+    prediction_max_picks_per_sport: int = 3
+    prediction_exclude_started_matches: bool = True
+    prediction_start_buffer_minutes: int = 0
 
     xgboost_enabled: bool = True
     xgboost_model_path: str = './models/rolley_xgb_v1.json'

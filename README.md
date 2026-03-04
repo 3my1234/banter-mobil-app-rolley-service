@@ -43,6 +43,9 @@ Replace providers with real feeds:
 - ESPN provider is enabled by default in `app/providers/sports_provider.py`.
 - Broad league coverage is controlled by `SOCCER_COMPETITIONS` (top leagues + UEFA + secondary leagues by default).
 - Strict same-day filtering is controlled by `SAME_DAY_ONLY=true`.
+- Event-day timezone per sport:
+  - `SOCCER_EVENT_TIMEZONE=UTC`
+  - `BASKETBALL_EVENT_TIMEZONE=America/New_York`
 - `SPORTS_FALLBACK_TO_STUB=false` keeps production strict (no synthetic fixtures if provider has no same-day games).
 - ESPN enrichment now pulls standings/table context, injury counts, and stores completed matches in `rolley_match_history` for in-service H2H weighting.
 - Optional fallbacks:
@@ -50,6 +53,11 @@ Replace providers with real feeds:
   - `FOOTBALL_DATA_ENABLED=true` with `FOOTBALL_DATA_KEY`
 - When critical enrichment is missing, match confidence receives an automatic penalty before final pick ranking.
 - Primary picks are filtered by minimum completeness (`PRIMARY_MIN_COMPLETENESS`, default `0.65`) before confidence ranking.
+- Prediction quality controls:
+  - `PREDICTION_MIN_CONFIDENCE` (default `0.90`)
+  - `PREDICTION_MAX_PICKS_PER_SPORT` (default `3`)
+  - `PREDICTION_EXCLUDE_STARTED_MATCHES=true`
+  - `PREDICTION_START_BUFFER_MINUTES=0`
 - Gemini key in env enriches urgency/volatility features.
 - Probability engine in `app/reasoning.py` loads trained XGBoost from `XGBOOST_MODEL_PATH`.
 
@@ -59,6 +67,20 @@ cd rolley-service
 python scripts/train_xgboost.py
 # or with your labeled csv:
 # python scripts/train_xgboost.py --dataset data/historical_training.csv --output models/rolley_xgb_v1.json --version xgb-v1
+```
+
+## Backfill match history (for richer training data)
+```bash
+cd rolley-service
+python scripts/backfill_match_history.py --start-date 2024-01-01 --end-date 2026-03-04 --sports SOCCER,BASKETBALL
+```
+This fills `rolley_match_history` with completed matches from provider scoreboards so you can export/train on much larger real history.
+
+## Export training CSV from history
+```bash
+cd rolley-service
+python scripts/export_training_dataset.py --output data/historical_training.csv --lookback 12 --min-team-games 5
+python scripts/train_xgboost.py --dataset data/historical_training.csv --output models/rolley_xgb_v1.json --version xgb-v1
 ```
 
 ## Cron

@@ -123,7 +123,6 @@ class PicksService:
                     model_version=model_result.model_version,
                 )
                 staged.append((record, match.data_completeness))
-                db.add(record)
 
             if staged:
                 staged.sort(key=lambda item: item[0].confidence, reverse=True)
@@ -133,6 +132,7 @@ class PicksService:
                 primary_ids = self._select_primary_ids(staged=staged)
                 for row, _completeness in staged:
                     row.is_primary = row.id in primary_ids
+                    db.add(row)
                     db.add(
                         PickSettlement(
                             id=str(uuid4()),

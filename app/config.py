@@ -38,9 +38,14 @@ class Settings(BaseSettings):
     cron_enabled: bool = True
     cron_hour_utc: int = 8
     cron_minute_utc: int = 0
+    auto_settlement_enabled: bool = True
+    auto_settlement_hour_utc: int = 2
+    auto_settlement_minute_utc: int = 30
+    auto_settlement_offset_days: int = 1
 
     default_pick_count: int = 10
     primary_pick_count: int = 1
+    primary_min_completeness: float = 0.65
 
     xgboost_enabled: bool = True
     xgboost_model_path: str = './models/rolley_xgb_v1.json'

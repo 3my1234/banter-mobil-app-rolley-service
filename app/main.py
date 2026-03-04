@@ -1,13 +1,20 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from .config import get_settings
-from .schemas import PickSettlementPayload, RefreshResponse, Sport, StakeCreateRequest
+from .schemas import (
+    AutoSettlementResponse,
+    PerformanceStatsResponse,
+    PickSettlementPayload,
+    RefreshResponse,
+    Sport,
+    StakeCreateRequest,
+)
 from .services.picks_service import PicksService
 from .storage import get_db, init_db
 
@@ -39,6 +46,16 @@ async def startup_event() -> None:
             id='daily-picks-refresh',
             replace_existing=True,
         )
+    if settings.auto_settlement_enabled:
+        scheduler.add_job(
+            _run_auto_settlement,
+            trigger='cron',
+            hour=settings.auto_settlement_hour_utc,
+            minute=settings.auto_settlement_minute_utc,
+            id='daily-picks-auto-settlement',
+            replace_existing=True,
+        )
+    if (settings.cron_enabled or settings.auto_settlement_enabled) and not scheduler.running:
         scheduler.start()
 
 
@@ -54,6 +71,17 @@ async def _run_daily_refresh() -> None:
     db = SessionLocal()
     try:
         await service.refresh_daily_picks(db, target_date=date.today())
+    finally:
+        db.close()
+
+
+async def _run_auto_settlement() -> None:
+    from .storage import SessionLocal
+
+    db = SessionLocal()
+    try:
+        target_date = date.today() - timedelta(days=max(settings.auto_settlement_offset_days, 1))
+        service.auto_settle_date(db, target_date=target_date, settled_by='AUTO_CRON')
     finally:
         db.close()
 
@@ -121,6 +149,27 @@ def settle_pick(
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return {'success': True, 'pick': pick}
+
+
+@app.post(f'{settings.api_prefix}/admin/picks/auto-settle', response_model=AutoSettlementResponse)
+def auto_settle_picks(
+    pick_date: date | None = Query(default=None),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    target_date = pick_date or (date.today() - timedelta(days=max(settings.auto_settlement_offset_days, 1)))
+    return service.auto_settle_date(db, target_date=target_date, settled_by='ADMIN_AUTO')
+
+
+@app.get(f'{settings.api_prefix}/stats/performance', response_model=PerformanceStatsResponse)
+def get_performance_stats(
+    days: int = Query(default=30, ge=1, le=3650),
+    model_version: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    return service.get_performance_stats(db, days=days, model_version=model_version)
 
 
 @app.post(f'{settings.api_prefix}/stakes/create')

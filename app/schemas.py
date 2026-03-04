@@ -101,14 +101,39 @@ class DailyPicksResponse(BaseModel):
     date: date
     sport: Sport
     primary_pick: RolleyPick | None = None
-    alternatives: list[RolleyPick] = []
-    picks: list[RolleyPick] = []
+    alternatives: list[RolleyPick] = Field(default_factory=list)
+    picks: list[RolleyPick] = Field(default_factory=list)
 
 
 class RefreshResponse(BaseModel):
     success: bool
     date: date
     generated: int
+
+
+class AutoSettlementResponse(BaseModel):
+    success: bool
+    date: date
+    total_candidates: int
+    settled_now: int
+    unresolved: int
+    skipped_non_pending: int
+    win: int
+    loss: int
+    void: int
+
+
+class PerformanceStatsResponse(BaseModel):
+    date_from: date
+    date_to: date
+    model_version: str | None = None
+    total: int
+    pending: int
+    win: int
+    loss: int
+    void: int
+    settled: int
+    win_rate: float
 
 
 class StakeCreateRequest(BaseModel):

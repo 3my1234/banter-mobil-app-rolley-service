@@ -15,6 +15,8 @@ Standalone AI picks microservice for Banter's Rolley Bot page.
 - `POST /api/v1/picks/refresh?refresh_date=YYYY-MM-DD` (optional `X-Admin-Key`)
 - `GET /api/v1/admin/picks?pick_date=YYYY-MM-DD&sport=SOCCER` (`X-Admin-Key`)
 - `POST /api/v1/admin/picks/{pick_id}/settle` (`X-Admin-Key`, outcome `WIN|LOSS|VOID|PENDING`)
+- `POST /api/v1/admin/picks/auto-settle?pick_date=YYYY-MM-DD` (`X-Admin-Key`)
+- `GET /api/v1/stats/performance?days=30&model_version=xgb-v1`
 - `POST /api/v1/stakes/create`
 - `GET /api/v1/stakes?user_id=<id>`
 - `POST /api/v1/stakes/{stake_id}/withdraw?user_id=<id>`
@@ -47,6 +49,7 @@ Replace providers with real feeds:
   - `API_FOOTBALL_ENABLED=true` with `API_FOOTBALL_KEY` and `API_FOOTBALL_HOST`
   - `FOOTBALL_DATA_ENABLED=true` with `FOOTBALL_DATA_KEY`
 - When critical enrichment is missing, match confidence receives an automatic penalty before final pick ranking.
+- Primary picks are filtered by minimum completeness (`PRIMARY_MIN_COMPLETENESS`, default `0.65`) before confidence ranking.
 - Gemini key in env enriches urgency/volatility features.
 - Probability engine in `app/reasoning.py` loads trained XGBoost from `XGBOOST_MODEL_PATH`.
 

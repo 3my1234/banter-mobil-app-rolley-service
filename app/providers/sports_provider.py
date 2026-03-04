@@ -328,7 +328,7 @@ class SportsDataProvider:
         sport: Sport,
         home_team: str,
         away_team: str,
-        max_matches: int = 8,
+        max_matches: int = 10,
     ) -> tuple[float, float, float] | None:
         if db is None:
             return None

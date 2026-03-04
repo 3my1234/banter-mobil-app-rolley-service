@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_FLOOR
 from uuid import uuid4
@@ -8,13 +9,15 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, joinedload
 
 from ..config import get_settings
-from ..models import PickRecord, PickSettlement, StakeDailyResult, StakePosition
+from ..models import MatchHistory, PickRecord, PickSettlement, StakeDailyResult, StakePosition
 from ..providers.gemini_client import GeminiContextClient
 from ..providers.sports_provider import SportsDataProvider
 from ..reasoning import ProbabilityEngine, RolleyDecisionEngine
 from ..schemas import (
+    AutoSettlementResponse,
     DailyPicksResponse,
     PickSettlementPayload,
+    PerformanceStatsResponse,
     RefreshResponse,
     RolleyPick,
     SettlementOutcome,
@@ -73,7 +76,7 @@ class PicksService:
             )
             db.flush()
 
-            staged: list[PickRecord] = []
+            staged: list[tuple[PickRecord, float]] = []
             for match in matches:
                 context = await self._gemini.extract_context(match)
                 model_result = self._probability.predict(match, context)
@@ -111,13 +114,14 @@ class PicksService:
                     rationale=rationale,
                     model_version=model_result.model_version,
                 )
-                staged.append(record)
+                staged.append((record, match.data_completeness))
                 db.add(record)
 
             if staged:
-                staged.sort(key=lambda item: item.confidence, reverse=True)
-                for idx, row in enumerate(staged):
-                    row.is_primary = idx < self._settings.primary_pick_count
+                staged.sort(key=lambda item: item[0].confidence, reverse=True)
+                primary_ids = self._select_primary_ids(staged=staged)
+                for row, _completeness in staged:
+                    row.is_primary = row.id in primary_ids
                     db.add(
                         PickSettlement(
                             id=str(uuid4()),
@@ -200,6 +204,135 @@ class PicksService:
             .order_by(PickRecord.sport.asc(), PickRecord.is_primary.desc(), PickRecord.confidence.desc())
         ).all()
         return [self._to_pick_view(row) for row in rows]
+
+    def auto_settle_date(
+        self,
+        db: Session,
+        *,
+        target_date: date,
+        settled_by: str = 'AUTO_SYSTEM',
+    ) -> AutoSettlementResponse:
+        # Refresh historical results for the target day before settlement evaluation.
+        for sport in [Sport.SOCCER, Sport.BASKETBALL]:
+            self._sports.fetch_matches(
+                sport=sport,
+                target_date=datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc),
+                db=db,
+            )
+        db.flush()
+
+        rows = db.scalars(
+            select(PickRecord)
+            .options(joinedload(PickRecord.settlement))
+            .where(PickRecord.pick_date == target_date)
+            .order_by(PickRecord.created_at.asc())
+        ).all()
+
+        settled_now = 0
+        unresolved = 0
+        skipped_non_pending = 0
+        win_count = 0
+        loss_count = 0
+        void_count = 0
+
+        for pick in rows:
+            settlement = pick.settlement
+            if settlement is None:
+                settlement = PickSettlement(id=str(uuid4()), pick_id=pick.id, outcome=SettlementOutcome.PENDING.value)
+                db.add(settlement)
+                db.flush()
+
+            if settlement.outcome != SettlementOutcome.PENDING.value:
+                skipped_non_pending += 1
+                continue
+
+            history = db.get(MatchHistory, pick.external_match_id)
+            if history is None:
+                unresolved += 1
+                continue
+
+            outcome = self._evaluate_pick_outcome(pick=pick, history=history)
+            settlement.outcome = outcome.value
+            settlement.settled_by = settled_by
+            settlement.notes = f'auto-settled final score {history.home_score}-{history.away_score}'
+            settlement.settled_at = datetime.utcnow()
+            db.add(settlement)
+            settled_now += 1
+            if outcome == SettlementOutcome.WIN:
+                win_count += 1
+            elif outcome == SettlementOutcome.LOSS:
+                loss_count += 1
+            else:
+                void_count += 1
+
+            if pick.is_primary and outcome != SettlementOutcome.PENDING:
+                self._apply_settlement_to_stakes(db, pick=pick, outcome=outcome)
+
+        db.commit()
+        return AutoSettlementResponse(
+            success=True,
+            date=target_date,
+            total_candidates=len(rows),
+            settled_now=settled_now,
+            unresolved=unresolved,
+            skipped_non_pending=skipped_non_pending,
+            win=win_count,
+            loss=loss_count,
+            void=void_count,
+        )
+
+    def get_performance_stats(
+        self,
+        db: Session,
+        *,
+        days: int = 30,
+        model_version: str | None = None,
+    ) -> PerformanceStatsResponse:
+        safe_days = max(1, min(days, 3650))
+        date_to = date.today()
+        date_from = date_to - timedelta(days=safe_days - 1)
+        rows = db.scalars(
+            select(PickRecord)
+            .options(joinedload(PickRecord.settlement))
+            .where(PickRecord.pick_date >= date_from, PickRecord.pick_date <= date_to)
+            .order_by(PickRecord.pick_date.desc(), PickRecord.created_at.desc())
+        ).all()
+
+        pending = 0
+        win = 0
+        loss = 0
+        void = 0
+        total = 0
+        for row in rows:
+            if model_version and row.model_version != model_version:
+                continue
+            total += 1
+            outcome = row.settlement.outcome if row.settlement else SettlementOutcome.PENDING.value
+            if outcome == SettlementOutcome.WIN.value:
+                win += 1
+            elif outcome == SettlementOutcome.LOSS.value:
+                loss += 1
+            elif outcome == SettlementOutcome.VOID.value:
+                void += 1
+            else:
+                pending += 1
+
+        settled = win + loss + void
+        denominator = win + loss
+        win_rate = round((win / denominator), 4) if denominator > 0 else 0.0
+
+        return PerformanceStatsResponse(
+            date_from=date_from,
+            date_to=date_to,
+            model_version=model_version,
+            total=total,
+            pending=pending,
+            win=win,
+            loss=loss,
+            void=void,
+            settled=settled,
+            win_rate=win_rate,
+        )
 
     def create_stake(self, db: Session, payload: StakeCreateRequest) -> StakeCreateResponse:
         starts_on = date.today()
@@ -331,6 +464,67 @@ class PicksService:
         adjusted_odds = 1.01 + max(0.0, min(0.08, (adjusted_confidence - 0.55) * 0.22))
         adjusted_odds = round(max(1.01, min(decision_implied_odds, adjusted_odds, 1.09)), 4)
         return adjusted_confidence, adjusted_odds
+
+    def _select_primary_ids(self, *, staged: list[tuple[PickRecord, float]]) -> set[str]:
+        min_completeness = max(0.0, min(1.0, float(self._settings.primary_min_completeness)))
+        eligible = [item for item in staged if item[1] >= min_completeness]
+        source = eligible if eligible else staged
+        source.sort(key=lambda item: (item[0].confidence, item[1]), reverse=True)
+        return {row.id for row, _completeness in source[: self._settings.primary_pick_count]}
+
+    def _evaluate_pick_outcome(self, *, pick: PickRecord, history: MatchHistory) -> SettlementOutcome:
+        market = (pick.market or '').upper()
+        selection = (pick.selection or '').strip().upper()
+        home_score = int(history.home_score)
+        away_score = int(history.away_score)
+        total_goals = home_score + away_score
+
+        if market == 'TOTAL_GOALS':
+            if 'OVER 0.5' in selection:
+                return SettlementOutcome.WIN if total_goals > 0 else SettlementOutcome.LOSS
+            if 'OVER 1.5' in selection:
+                return SettlementOutcome.WIN if total_goals > 1 else SettlementOutcome.LOSS
+            threshold = self._extract_threshold(selection=selection, token='OVER')
+            if threshold is not None:
+                return SettlementOutcome.WIN if total_goals > threshold else SettlementOutcome.LOSS
+            return SettlementOutcome.VOID
+
+        if market in {'HANDICAP', 'ALT_SPREAD'}:
+            parsed = self._extract_side_and_line(selection=selection)
+            if not parsed:
+                return SettlementOutcome.VOID
+            side, line = parsed
+            if side == 'HOME':
+                return SettlementOutcome.WIN if (home_score + line) > away_score else SettlementOutcome.LOSS
+            return SettlementOutcome.WIN if (away_score + line) > home_score else SettlementOutcome.LOSS
+
+        if market == 'DOUBLE_CHANCE':
+            if selection == '1X':
+                return SettlementOutcome.WIN if home_score >= away_score else SettlementOutcome.LOSS
+            if selection == 'X2':
+                return SettlementOutcome.WIN if away_score >= home_score else SettlementOutcome.LOSS
+            return SettlementOutcome.VOID
+
+        return SettlementOutcome.VOID
+
+    def _extract_threshold(self, *, selection: str, token: str) -> float | None:
+        pattern = rf'{token}\s+([0-9]+(?:\.[0-9]+)?)'
+        match = re.search(pattern, selection)
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except Exception:
+            return None
+
+    def _extract_side_and_line(self, *, selection: str) -> tuple[str, float] | None:
+        match = re.search(r'(HOME|AWAY)\s*\+\s*([0-9]+(?:\.[0-9]+)?)', selection)
+        if not match:
+            return None
+        try:
+            return match.group(1), float(match.group(2))
+        except Exception:
+            return None
 
     def _to_pick_view(self, row: PickRecord) -> RolleyPick:
         settlement = row.settlement

@@ -57,6 +57,7 @@ class PicksService:
             matches = self._sports.fetch_matches(
                 sport=sport,
                 target_date=datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc),
+                db=db,
             )
 
             db.execute(

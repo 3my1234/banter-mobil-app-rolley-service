@@ -36,12 +36,20 @@ class MatchCandidate(BaseModel):
     league: str
     home_team: str
     away_team: str
+    home_team_id: str | None = None
+    away_team_id: str | None = None
     kick_off_utc: datetime
     h2h_home_win_rate: float = Field(ge=0, le=1)
     h2h_draw_rate: float = Field(ge=0, le=1)
     h2h_away_win_rate: float = Field(ge=0, le=1)
     home_form_index: float = Field(ge=0, le=1)
     away_form_index: float = Field(ge=0, le=1)
+    home_table_position: int | None = None
+    away_table_position: int | None = None
+    home_points: int | None = None
+    away_points: int | None = None
+    home_injuries: int = 0
+    away_injuries: int = 0
 
 
 class ProbabilitySet(BaseModel):

@@ -63,6 +63,22 @@ class PickSettlement(Base):
     pick: Mapped[PickRecord] = relationship(back_populates='settlement')
 
 
+class MatchHistory(Base):
+    __tablename__ = 'rolley_match_history'
+
+    id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    sport: Mapped[str] = mapped_column(String(20), index=True)
+    league: Mapped[str] = mapped_column(String(120))
+    home_team: Mapped[str] = mapped_column(String(120), index=True)
+    away_team: Mapped[str] = mapped_column(String(120), index=True)
+    kick_off_utc: Mapped[datetime] = mapped_column(DateTime, index=True)
+    home_score: Mapped[int] = mapped_column(Integer)
+    away_score: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default='FINAL')
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class StakePosition(Base):
     __tablename__ = 'rolley_stake_positions'
 

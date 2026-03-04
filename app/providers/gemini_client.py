@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 import httpx
 from ..config import get_settings
 from ..schemas import MatchCandidate, MatchContext
@@ -64,18 +63,30 @@ class GeminiContextClient:
             return self._fallback(match)
 
     def _build_prompt(self, match: MatchCandidate) -> str:
+        standings_summary = (
+            f'home_pos={match.home_table_position or "na"},away_pos={match.away_table_position or "na"},'
+            f'home_points={match.home_points or "na"},away_points={match.away_points or "na"}'
+        )
+        injury_summary = f'home_injuries={match.home_injuries},away_injuries={match.away_injuries}'
         return (
             "You are Rolley Context Engine for sports risk analysis.\n"
             "Return JSON only with keys: urgency_score, volatility_index, injury_impact, fatigue_level, weather_impact.\n"
             "Each value must be number 0-10.\n"
-            f'Match: {match.home_team} vs {match.away_team} ({match.league}) on {match.kick_off_utc.isoformat()}.'
+            f'Match: {match.home_team} vs {match.away_team} ({match.league}) on {match.kick_off_utc.isoformat()}.\n'
+            f'Standings: {standings_summary}\n'
+            f'Injuries: {injury_summary}\n'
+            f'H2H: home={match.h2h_home_win_rate:.3f},draw={match.h2h_draw_rate:.3f},away={match.h2h_away_win_rate:.3f}\n'
+            f'Form: home={match.home_form_index:.3f},away={match.away_form_index:.3f}'
         )
 
     def _fallback(self, match: MatchCandidate) -> MatchContext:
         form_gap = max(0.0, match.home_form_index - match.away_form_index)
-        urgency = min(10.0, 4.8 + form_gap * 5.2)
-        volatility = max(1.5, 7.8 - form_gap * 6.1)
-        injury_impact = 2.8 + (datetime.utcnow().day % 3) * 0.6
+        table_gap = 0.0
+        if match.home_table_position and match.away_table_position:
+            table_gap = max(0.0, (match.away_table_position - match.home_table_position) / 20)
+        urgency = min(10.0, 4.6 + form_gap * 4.8 + table_gap * 2.2)
+        volatility = max(1.2, 7.7 - form_gap * 5.4 - table_gap * 1.4)
+        injury_impact = min(10.0, 1.8 + (match.home_injuries + match.away_injuries) * 0.9)
         fatigue = 3.2
         weather = 1.0 if match.sport.value == 'BASKETBALL' else 2.5
         return MatchContext(

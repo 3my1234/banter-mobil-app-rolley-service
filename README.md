@@ -39,8 +39,10 @@ EXPO_PUBLIC_ROLLEY_SERVICE_URL=http://<ip-or-domain>:8090
 ## Production note
 Replace providers with real feeds:
 - ESPN provider is enabled by default in `app/providers/sports_provider.py`.
+- Broad league coverage is controlled by `SOCCER_COMPETITIONS` (top leagues + UEFA + secondary leagues by default).
 - Strict same-day filtering is controlled by `SAME_DAY_ONLY=true`.
 - `SPORTS_FALLBACK_TO_STUB=false` keeps production strict (no synthetic fixtures if provider has no same-day games).
+- ESPN enrichment now pulls standings/table context, injury counts, and stores completed matches in `rolley_match_history` for in-service H2H weighting.
 - Gemini key in env enriches urgency/volatility features.
 - Probability engine in `app/reasoning.py` loads trained XGBoost from `XGBOOST_MODEL_PATH`.
 

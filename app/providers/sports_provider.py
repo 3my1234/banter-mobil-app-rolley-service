@@ -130,7 +130,9 @@ class SportsDataProvider:
         if self._settings.same_day_only:
             event_tz = self._event_timezone_for_sport(sport)
             kickoff_day = kickoff.astimezone(event_tz).date()
-            target_day = target_date.astimezone(event_tz).date()
+            # target_date carries the requested date token (YYYYMMDD). Keep that
+            # calendar day stable instead of converting midnight UTC to local TZ.
+            target_day = target_date.date()
             if kickoff_day != target_day:
                 return None
 

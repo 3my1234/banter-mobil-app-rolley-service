@@ -48,6 +48,7 @@ class APIFootballProvider:
         self._standings_cache: dict[tuple[int, int], tuple[datetime, dict[str, dict[str, Any]]]] = {}
         self._injury_cache: dict[tuple[int, int, int], tuple[datetime, int]] = {}
         self._h2h_cache: dict[tuple[int, int], tuple[datetime, tuple[float, float, float]]] = {}
+        self._rapidapi_base = 'https://api-football-v1.p.rapidapi.com/v3'
 
     @property
     def enabled(self) -> bool:
@@ -83,8 +84,17 @@ class APIFootballProvider:
         if not league_id:
             return result
 
-        season = self._season_for_date(target_date)
-        standings = self._get_standings(league_id=league_id, season=season)
+        seasons = self._season_candidates(target_date)
+        standings: dict[str, dict[str, Any]] = {}
+        resolved_season = seasons[0]
+        for season in seasons:
+            standings = self._get_standings(league_id=league_id, season=season)
+            if standings:
+                resolved_season = season
+                break
+        if not standings:
+            result['sources'].append('api-football:standings-miss')
+
         home_entry = self._lookup_team(standings, home_team)
         away_entry = self._lookup_team(standings, away_team)
         if home_entry and away_entry:
@@ -101,8 +111,8 @@ class APIFootballProvider:
         away_team_id = away_entry.get('team_id') if away_entry else None
 
         if home_team_id and away_team_id:
-            home_inj = self._get_injuries(league_id=league_id, season=season, team_id=int(home_team_id))
-            away_inj = self._get_injuries(league_id=league_id, season=season, team_id=int(away_team_id))
+            home_inj = self._get_injuries(league_id=league_id, season=resolved_season, team_id=int(home_team_id))
+            away_inj = self._get_injuries(league_id=league_id, season=resolved_season, team_id=int(away_team_id))
             result['home_injuries'] = home_inj
             result['away_injuries'] = away_inj
             result['has_injuries'] = True
@@ -113,19 +123,47 @@ class APIFootballProvider:
                 result['h2h'] = h2h
                 result['has_h2h'] = True
                 result['sources'].append('api-football:h2h')
+        else:
+            result['sources'].append('api-football:team-map-miss')
 
         return result
 
     def _request(self, path: str, params: dict[str, Any]) -> Any:
-        headers = {
-            'x-apisports-key': self._api_key,
-            'x-apisports-host': self._host,
-        }
-        with httpx.Client(timeout=15) as client:
-            response = client.get(f'{self._base_url}{path}', headers=headers, params=params)
-            response.raise_for_status()
-            payload = response.json()
-        return payload.get('response') or []
+        errors: list[str] = []
+        modes = [
+            (
+                f'{self._base_url}{path}',
+                {
+                    'x-apisports-key': self._api_key,
+                    'x-apisports-host': self._host,
+                },
+            ),
+            (
+                f'{self._rapidapi_base}{path}',
+                {
+                    'x-rapidapi-key': self._api_key,
+                    'x-rapidapi-host': 'api-football-v1.p.rapidapi.com',
+                },
+            ),
+        ]
+
+        for url, headers in modes:
+            try:
+                with httpx.Client(timeout=15) as client:
+                    response = client.get(url, headers=headers, params=params)
+                if response.status_code >= 400:
+                    errors.append(f'{url} status {response.status_code}')
+                    continue
+                payload = response.json()
+                api_errors = payload.get('errors')
+                if api_errors:
+                    errors.append(f'{url} errors {api_errors}')
+                    continue
+                return payload.get('response') or []
+            except Exception as error:
+                errors.append(f'{url} exception {error}')
+
+        raise RuntimeError('; '.join(errors) if errors else 'api-football request failed')
 
     def _get_standings(self, *, league_id: int, season: int) -> dict[str, dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -237,6 +275,13 @@ class APIFootballProvider:
 
     def _season_for_date(self, target_date: datetime) -> int:
         return target_date.year if target_date.month >= 7 else target_date.year - 1
+
+    def _season_candidates(self, target_date: datetime) -> list[int]:
+        base = self._season_for_date(target_date)
+        current = target_date.year
+        if base == current:
+            return [base, base - 1]
+        return [base, current]
 
     def _normalize(self, value: str) -> str:
         return ' '.join(value.lower().replace('&', ' and ').split())

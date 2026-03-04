@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     )
     basketball_competitions: str = 'nba'
     same_day_only: bool = True
+    soccer_event_timezone: str = 'UTC'
+    basketball_event_timezone: str = 'America/New_York'
     sports_fallback_to_stub: bool = False
     api_football_enabled: bool = False
     api_football_key: str | None = None

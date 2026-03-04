@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from random import Random
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import or_, select
@@ -126,9 +127,12 @@ class SportsDataProvider:
         if kickoff is None:
             return None
 
-        # Strict same-day filtering in UTC.
-        if self._settings.same_day_only and kickoff.date() != target_date.date():
-            return None
+        if self._settings.same_day_only:
+            event_tz = self._event_timezone_for_sport(sport)
+            kickoff_day = kickoff.astimezone(event_tz).date()
+            target_day = target_date.astimezone(event_tz).date()
+            if kickoff_day != target_day:
+                return None
 
         home = next((c for c in competitors if str(c.get('homeAway', '')).lower() == 'home'), competitors[0])
         away = next((c for c in competitors if str(c.get('homeAway', '')).lower() == 'away'), competitors[1])
@@ -683,6 +687,17 @@ class SportsDataProvider:
     def _normalize_team_name(self, name: str) -> str:
         normalized = re.sub(r'[^a-z0-9]+', ' ', name.lower()).strip()
         return re.sub(r'\s+', ' ', normalized)
+
+    def _event_timezone_for_sport(self, sport: Sport) -> ZoneInfo:
+        configured = (
+            self._settings.soccer_event_timezone
+            if sport == Sport.SOCCER
+            else self._settings.basketball_event_timezone
+        )
+        try:
+            return ZoneInfo(configured)
+        except Exception:
+            return ZoneInfo('UTC')
 
     def _parse_datetime(self, value: str) -> datetime | None:
         try:

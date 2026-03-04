@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..models import MatchHistory
+from .api_football_provider import APIFootballProvider
+from .football_data_provider import FootballDataProvider
 from ..schemas import MatchCandidate, Sport
 
 
@@ -26,8 +28,10 @@ class SportsDataProvider:
         self._rng = Random(42)
         self._settings = get_settings()
         self._provider = (self._settings.sports_provider or 'ESPN').strip().upper()
-        self._injury_cache: dict[tuple[str, str, str], int] = {}
+        self._injury_cache: dict[tuple[str, str, str], tuple[int, bool]] = {}
         self._standings_cache: dict[tuple[str, str], dict[str, dict[str, float | int | str]]] = {}
+        self._api_football = APIFootballProvider()
+        self._football_data = FootballDataProvider()
 
     def fetch_matches(self, *, sport: Sport, target_date: datetime, db: Session | None = None) -> list[MatchCandidate]:
         if self._provider == 'STUB':
@@ -160,17 +164,83 @@ class SportsDataProvider:
         home_form = float(home_table.get('form_index') or home_pct)
         away_form = float(away_table.get('form_index') or away_pct)
 
-        home_injuries = self._get_team_injuries(sport=sport, competition_code=competition, team_id=home_team_id)
-        away_injuries = self._get_team_injuries(sport=sport, competition_code=competition, team_id=away_team_id)
+        home_injuries, home_injury_available = self._get_team_injuries(
+            sport=sport,
+            competition_code=competition,
+            team_id=home_team_id,
+        )
+        away_injuries, away_injury_available = self._get_team_injuries(
+            sport=sport,
+            competition_code=competition,
+            team_id=away_team_id,
+        )
+
+        data_sources = ['espn:scoreboard']
+        standings_complete = self._has_standings(home_table=home_table, away_table=away_table)
+        injuries_complete = home_injury_available and away_injury_available
+        enriched: dict[str, Any] | None = None
+
+        if sport == Sport.SOCCER and (not standings_complete or not injuries_complete):
+            enriched = self._enrich_soccer_fallback(
+                competition=competition,
+                target_date=target_date,
+                home_team=str(home_team),
+                away_team=str(away_team),
+            )
+            data_sources.extend(enriched.get('sources') or [])
+            if not standings_complete:
+                home_table = self._merge_table_data(current=home_table, fallback=enriched.get('home_table') or {})
+                away_table = self._merge_table_data(current=away_table, fallback=enriched.get('away_table') or {})
+                standings_complete = self._has_standings(home_table=home_table, away_table=away_table)
+                if standings_complete:
+                    home_form = float(home_table.get('form_index') or home_form)
+                    away_form = float(away_table.get('form_index') or away_form)
+
+            if not injuries_complete:
+                if enriched.get('home_injuries') is not None:
+                    home_injuries = int(enriched['home_injuries'])
+                if enriched.get('away_injuries') is not None:
+                    away_injuries = int(enriched['away_injuries'])
+                injuries_complete = bool(enriched.get('has_injuries'))
+
         injury_penalty_home = min(0.25, home_injuries * 0.015)
         injury_penalty_away = min(0.25, away_injuries * 0.015)
         home_form = max(0.05, min(0.95, home_form - injury_penalty_home + injury_penalty_away * 0.35))
         away_form = max(0.05, min(0.95, away_form - injury_penalty_away + injury_penalty_home * 0.35))
 
+        has_h2h_data = False
         h2h = self._compute_h2h_from_history(db=db, sport=sport, home_team=str(home_team), away_team=str(away_team))
+        if h2h is not None:
+            data_sources.append('local:h2h')
+            has_h2h_data = True
+        if h2h is None and sport == Sport.SOCCER:
+            fallback_h2h = None
+            if enriched is not None and isinstance(enriched.get('h2h'), (list, tuple)) and len(enriched['h2h']) == 3:
+                item = enriched['h2h']
+                fallback_h2h = (float(item[0]), float(item[1]), float(item[2]))
+            if fallback_h2h is None:
+                fallback_h2h = self._get_soccer_h2h_fallback(
+                    competition=competition,
+                    target_date=target_date,
+                    home_team=str(home_team),
+                    away_team=str(away_team),
+                )
+            if fallback_h2h is not None:
+                h2h = fallback_h2h
+                data_sources.append('fallback:h2h')
+                has_h2h_data = True
         if h2h is None:
             h2h = self._strength_based_h2h(home_form=home_form, away_form=away_form, sport=sport)
+            data_sources.append('heuristic:h2h')
         home_h2h, draw, away_h2h = h2h
+
+        completeness = self._completeness_score(
+            sport=sport,
+            standings_complete=standings_complete,
+            injuries_complete=injuries_complete,
+            has_h2h=has_h2h_data,
+        )
+        confidence_penalty = self._confidence_penalty_from_completeness(completeness)
 
         return MatchCandidate(
             external_match_id=f'{sport.value}-{event_id}',
@@ -192,6 +262,9 @@ class SportsDataProvider:
             away_points=int(away_table.get('points')) if away_table.get('points') is not None else None,
             home_injuries=home_injuries,
             away_injuries=away_injuries,
+            data_completeness=completeness,
+            confidence_penalty=confidence_penalty,
+            data_sources=sorted(set(data_sources)),
         )
 
     def _upsert_completed_results(self, *, db: Session, sport: Sport, events: list[dict[str, Any]]) -> None:
@@ -316,6 +389,150 @@ class SportsDataProvider:
         draw = max(0.05, 1 - home_h2h - away_h2h) if sport == Sport.SOCCER else 0.01
         return home_h2h, draw, away_h2h
 
+    def _has_standings(
+        self,
+        *,
+        home_table: dict[str, float | int | str],
+        away_table: dict[str, float | int | str],
+    ) -> bool:
+        return bool(
+            (home_table.get('position') and away_table.get('position'))
+            or (home_table.get('points') is not None and away_table.get('points') is not None)
+        )
+
+    def _merge_table_data(
+        self,
+        *,
+        current: dict[str, float | int | str],
+        fallback: dict[str, Any],
+    ) -> dict[str, float | int | str]:
+        merged = dict(current)
+        for key in ('team_id', 'position', 'points', 'form_index'):
+            if merged.get(key) in (None, '', 0):
+                value = fallback.get(key)
+                if value not in (None, ''):
+                    merged[key] = value
+        return merged
+
+    def _enrich_soccer_fallback(
+        self,
+        *,
+        competition: str,
+        target_date: datetime,
+        home_team: str,
+        away_team: str,
+    ) -> dict[str, Any]:
+        merged: dict[str, Any] = {
+            'home_table': {},
+            'away_table': {},
+            'home_injuries': None,
+            'away_injuries': None,
+            'has_injuries': False,
+            'sources': [],
+            'h2h': None,
+        }
+
+        if self._api_football.enabled:
+            api_data = self._api_football.enrich_soccer_match(
+                competition_code=competition,
+                target_date=target_date,
+                home_team=home_team,
+                away_team=away_team,
+            )
+            merged['sources'].extend(api_data.get('sources') or [])
+            merged['home_table'] = {
+                'position': api_data.get('home_table_position'),
+                'points': api_data.get('home_points'),
+                'form_index': api_data.get('home_form_index'),
+            }
+            merged['away_table'] = {
+                'position': api_data.get('away_table_position'),
+                'points': api_data.get('away_points'),
+                'form_index': api_data.get('away_form_index'),
+            }
+            merged['home_injuries'] = api_data.get('home_injuries')
+            merged['away_injuries'] = api_data.get('away_injuries')
+            merged['has_injuries'] = bool(api_data.get('has_injuries'))
+            merged['h2h'] = api_data.get('h2h')
+
+        if self._football_data.enabled:
+            fd_data = self._football_data.enrich_soccer_match(
+                competition_code=competition,
+                target_date=target_date,
+                home_team=home_team,
+                away_team=away_team,
+            )
+            merged['sources'].extend(fd_data.get('sources') or [])
+            merged['home_table'] = self._merge_table_data(
+                current=merged.get('home_table') or {},
+                fallback={
+                    'position': fd_data.get('home_table_position'),
+                    'points': fd_data.get('home_points'),
+                    'form_index': fd_data.get('home_form_index'),
+                },
+            )
+            merged['away_table'] = self._merge_table_data(
+                current=merged.get('away_table') or {},
+                fallback={
+                    'position': fd_data.get('away_table_position'),
+                    'points': fd_data.get('away_points'),
+                    'form_index': fd_data.get('away_form_index'),
+                },
+            )
+
+        return merged
+
+    def _get_soccer_h2h_fallback(
+        self,
+        *,
+        competition: str,
+        target_date: datetime,
+        home_team: str,
+        away_team: str,
+    ) -> tuple[float, float, float] | None:
+        enriched = self._enrich_soccer_fallback(
+            competition=competition,
+            target_date=target_date,
+            home_team=home_team,
+            away_team=away_team,
+        )
+        h2h = enriched.get('h2h')
+        if isinstance(h2h, (list, tuple)) and len(h2h) == 3:
+            return float(h2h[0]), float(h2h[1]), float(h2h[2])
+        return None
+
+    def _completeness_score(
+        self,
+        *,
+        sport: Sport,
+        standings_complete: bool,
+        injuries_complete: bool,
+        has_h2h: bool,
+    ) -> float:
+        if sport == Sport.BASKETBALL:
+            score = 0.5
+            score += 0.2 if standings_complete else 0
+            score += 0.15 if injuries_complete else 0
+            score += 0.15 if has_h2h else 0
+            return round(max(0.3, min(1.0, score)), 4)
+
+        score = 0.45
+        score += 0.25 if standings_complete else 0
+        score += 0.15 if injuries_complete else 0
+        score += 0.15 if has_h2h else 0
+        return round(max(0.25, min(1.0, score)), 4)
+
+    def _confidence_penalty_from_completeness(self, completeness: float) -> float:
+        if completeness >= 0.95:
+            return 0.0
+        if completeness >= 0.85:
+            return 0.03
+        if completeness >= 0.75:
+            return 0.07
+        if completeness >= 0.65:
+            return 0.11
+        return 0.15
+
     def _get_standings(self, *, sport: Sport, competition: str) -> dict[str, dict[str, float | int | str]]:
         cache_key = (sport.value, competition)
         cached = self._standings_cache.get(cache_key)
@@ -420,9 +637,9 @@ class SportsDataProvider:
                 return by_id
         return standings.get(self._normalize_team_name(team_name), {})
 
-    def _get_team_injuries(self, *, sport: Sport, competition_code: str, team_id: str | None) -> int:
+    def _get_team_injuries(self, *, sport: Sport, competition_code: str, team_id: str | None) -> tuple[int, bool]:
         if not team_id:
-            return 0
+            return 0, False
 
         cache_key = (sport.value, competition_code, team_id)
         if cache_key in self._injury_cache:
@@ -434,21 +651,24 @@ class SportsDataProvider:
             url = f'https://site.api.espn.com/apis/site/v2/sports/basketball/{competition_code}/teams/{team_id}'
 
         count = 0
+        available = False
         try:
             with httpx.Client(timeout=12) as client:
                 response = client.get(url)
                 response.raise_for_status()
             payload = response.json()
+            available = True
             count += self._count_injuries(payload.get('injuries') or [])
             for athlete in payload.get('athletes') or []:
                 if isinstance(athlete, dict):
                     count += self._count_injuries(athlete.get('injuries') or [])
         except Exception:
             count = 0
+            available = False
 
         count = min(12, max(0, count))
-        self._injury_cache[cache_key] = count
-        return count
+        self._injury_cache[cache_key] = (count, available)
+        return count, available
 
     def _count_injuries(self, injuries: list[dict[str, Any]]) -> int:
         tracked = 0

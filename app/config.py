@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     basketball_competitions: str = 'nba'
     same_day_only: bool = True
     sports_fallback_to_stub: bool = False
+    api_football_enabled: bool = False
+    api_football_key: str | None = None
+    api_football_host: str = 'v3.football.api-sports.io'
+    football_data_enabled: bool = False
+    football_data_key: str | None = None
 
     admin_refresh_key: str | None = None
 

@@ -82,6 +82,19 @@ class PicksService:
                     probabilities=model_result.probabilities,
                     context=context,
                 )
+                confidence, implied_odds = self._apply_match_penalty(
+                    decision_confidence=decision.confidence,
+                    decision_implied_odds=decision.implied_odds,
+                    penalty=match.confidence_penalty,
+                )
+                rationale = decision.rationale
+                if match.confidence_penalty > 0:
+                    rationale = (
+                        f'{rationale} '
+                        f'[Data completeness {match.data_completeness:.0%}; '
+                        f'confidence penalty {match.confidence_penalty:.0%}; '
+                        f'sources: {", ".join(match.data_sources)}]'
+                    )
                 record = PickRecord(
                     id=str(uuid4()),
                     external_match_id=match.external_match_id,
@@ -93,9 +106,9 @@ class PicksService:
                     kick_off_utc=match.kick_off_utc,
                     market=decision.market,
                     selection=decision.selection,
-                    confidence=decision.confidence,
-                    implied_odds=decision.implied_odds,
-                    rationale=decision.rationale,
+                    confidence=confidence,
+                    implied_odds=implied_odds,
+                    rationale=rationale,
                     model_version=model_result.model_version,
                 )
                 staged.append(record)
@@ -304,6 +317,20 @@ class PicksService:
         position.gross_profit_raw = str(profit)
         position.platform_fee_raw = str(fee)
         position.net_payout_raw = str(net)
+
+    def _apply_match_penalty(
+        self,
+        *,
+        decision_confidence: float,
+        decision_implied_odds: float,
+        penalty: float,
+    ) -> tuple[float, float]:
+        safe_penalty = max(0.0, min(0.25, float(penalty)))
+        adjusted_confidence = round(max(0.35, min(0.99, decision_confidence * (1 - safe_penalty))), 4)
+        # keep odds conservative and in platform range
+        adjusted_odds = 1.01 + max(0.0, min(0.08, (adjusted_confidence - 0.55) * 0.22))
+        adjusted_odds = round(max(1.01, min(decision_implied_odds, adjusted_odds, 1.09)), 4)
+        return adjusted_confidence, adjusted_odds
 
     def _to_pick_view(self, row: PickRecord) -> RolleyPick:
         settlement = row.settlement

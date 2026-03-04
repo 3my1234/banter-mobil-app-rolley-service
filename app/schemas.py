@@ -50,6 +50,9 @@ class MatchCandidate(BaseModel):
     away_points: int | None = None
     home_injuries: int = 0
     away_injuries: int = 0
+    data_completeness: float = Field(default=1.0, ge=0, le=1)
+    confidence_penalty: float = Field(default=0.0, ge=0, le=1)
+    data_sources: list[str] = Field(default_factory=list)
 
 
 class ProbabilitySet(BaseModel):

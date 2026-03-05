@@ -87,6 +87,13 @@ class ProbabilityEngine:
             'fatigue_level': context.fatigue_level / 10,
             'weather_impact': context.weather_impact / 10,
             'home_edge': home_edge,
+            'h2h_sample_size': max(0.0, min(1.0, float(match.h2h_sample_size) / 20.0)),
+            'home_recent5_scored_rate': match.home_recent5_scored_rate,
+            'away_recent5_scored_rate': match.away_recent5_scored_rate,
+            'home_recent5_goal_diff': max(0.0, min(1.0, (match.home_recent5_goal_diff + 5.0) / 10.0)),
+            'away_recent5_goal_diff': max(0.0, min(1.0, (match.away_recent5_goal_diff + 5.0) / 10.0)),
+            'home_recent5_opponent_strength': match.home_recent5_opponent_strength,
+            'away_recent5_opponent_strength': match.away_recent5_opponent_strength,
         }
         return [float(values.get(name, 0.0)) for name in self._feature_names]
 

@@ -66,7 +66,10 @@ class Settings(BaseSettings):
     xgboost_model_path: str = './models/rolley_xgb_v1.json'
     xgboost_feature_names: str = (
         'h2h_home_win_rate,h2h_draw_rate,h2h_away_win_rate,home_form_index,away_form_index,'
-        'urgency_score,volatility_index,injury_impact,fatigue_level,weather_impact,home_edge'
+        'urgency_score,volatility_index,injury_impact,fatigue_level,weather_impact,home_edge,'
+        'h2h_sample_size,home_recent5_scored_rate,away_recent5_scored_rate,'
+        'home_recent5_goal_diff,away_recent5_goal_diff,'
+        'home_recent5_opponent_strength,away_recent5_opponent_strength'
     )
 
 

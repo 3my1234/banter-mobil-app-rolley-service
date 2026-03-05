@@ -22,6 +22,13 @@ FEATURE_NAMES = [
     'fatigue_level',
     'weather_impact',
     'home_edge',
+    'h2h_sample_size',
+    'home_recent5_scored_rate',
+    'away_recent5_scored_rate',
+    'home_recent5_goal_diff',
+    'away_recent5_goal_diff',
+    'home_recent5_opponent_strength',
+    'away_recent5_opponent_strength',
 ]
 
 # 0=home_win,1=draw,2=away_win,3=over_05,4=over_15,5=home+1.5,6=away+1.5,7=home+8.5,8=away+8.5
@@ -36,7 +43,7 @@ def load_dataset(path: Path) -> tuple[np.ndarray, np.ndarray]:
         reader = csv.DictReader(handle)
         for record in reader:
             try:
-                row = [float(record[name]) for name in FEATURE_NAMES]
+                row = [float(record.get(name, 0) or 0) for name in FEATURE_NAMES]
                 label = int(record[TARGET_COL])
             except Exception:
                 continue
@@ -65,6 +72,13 @@ def build_bootstrap_dataset(samples: int = 6000) -> tuple[np.ndarray, np.ndarray
         fatigue = rng.uniform(0.0, 0.7)
         weather = rng.uniform(0.0, 0.6)
         home_edge = home_form - away_form
+        h2h_sample = rng.uniform(0.05, 1.0)
+        home_scored_rate = rng.uniform(0.4, 1.0)
+        away_scored_rate = rng.uniform(0.35, 1.0)
+        home_goal_diff = rng.uniform(0.2, 0.9)
+        away_goal_diff = rng.uniform(0.1, 0.85)
+        home_opp_strength = rng.uniform(0.3, 0.85)
+        away_opp_strength = rng.uniform(0.3, 0.85)
 
         row = [
             h2h_home,
@@ -78,6 +92,13 @@ def build_bootstrap_dataset(samples: int = 6000) -> tuple[np.ndarray, np.ndarray
             fatigue,
             weather,
             home_edge,
+            h2h_sample,
+            home_scored_rate,
+            away_scored_rate,
+            home_goal_diff,
+            away_goal_diff,
+            home_opp_strength,
+            away_opp_strength,
         ]
         rows.append(row)
 

@@ -17,6 +17,7 @@ from ..reasoning import Decision, ProbabilityEngine, RolleyDecisionEngine
 from ..schemas import (
     AutoSettlementResponse,
     DailyPicksResponse,
+    MatchCandidate,
     PickSettlementPayload,
     PerformanceStatsResponse,
     RefreshResponse,
@@ -116,6 +117,7 @@ class PicksService:
                     sport=sport,
                     decision=decision,
                     probabilities=model_result.probabilities,
+                    match=match,
                 )
                 league_risk = self._league_risk_profile(
                     sport=sport,
@@ -145,6 +147,7 @@ class PicksService:
                         f'{rationale} '
                         f'[League risk: {risk_reason}; confidence penalty {league_risk.penalty:.0%}]'
                     )
+                rationale = f'{rationale} {self._build_explain_fragment(match=match)}'
                 record = PickRecord(
                     id=str(uuid4()),
                     external_match_id=match.external_match_id,
@@ -527,7 +530,14 @@ class PicksService:
         odds = 1.01 + max(0.0, min(0.08, (confidence - 0.55) * 0.22))
         return round(max(1.01, min(1.09, odds)), 4)
 
-    def _apply_soccer_market_guardrail(self, *, sport: Sport, decision: Decision, probabilities) -> Decision:
+    def _apply_soccer_market_guardrail(
+        self,
+        *,
+        sport: Sport,
+        decision: Decision,
+        probabilities,
+        match: MatchCandidate,
+    ) -> Decision:
         if sport != Sport.SOCCER:
             return decision
         if not self._settings.soccer_primary_prefer_safe_markets:
@@ -535,29 +545,48 @@ class PicksService:
         if decision.market.upper() != 'HANDICAP':
             return decision
 
+        goal_floor = max(0.0, min(1.0, (match.home_recent5_scored_rate + match.away_recent5_scored_rate) / 2))
+        h2h_balance = 1.0 - min(1.0, abs(match.h2h_home_win_rate - match.h2h_away_win_rate))
+        strength_gap = match.home_recent5_opponent_strength - match.away_recent5_opponent_strength
+
+        over05 = max(float(probabilities.over_05), goal_floor * 0.92)
+        over15 = max(float(probabilities.over_15), goal_floor * 0.75)
+        one_x = float(probabilities.double_chance_1x)
+        x2 = float(probabilities.double_chance_x2)
+
+        # If one side has clearly stronger recent-opponent profile, tilt the double chance.
+        if strength_gap > 0.08:
+            one_x = min(0.99, one_x + 0.04)
+        elif strength_gap < -0.08:
+            x2 = min(0.99, x2 + 0.04)
+
+        # Balanced H2H + both teams scoring often => totals are safer than side coverage.
+        if h2h_balance > 0.72 and goal_floor > 0.65:
+            over15 = min(0.95, over15 + 0.03)
+
         safe_candidates = [
             (
                 'TOTAL_GOALS',
                 'Over 0.5',
-                max(0.35, min(0.99, float(probabilities.over_05))),
+                max(0.35, min(0.99, over05)),
                 'Soccer safe-market guardrail replaced handicap with goals floor.',
             ),
             (
                 'TOTAL_GOALS',
                 'Over 1.5',
-                max(0.30, min(0.95, float(probabilities.over_15))),
+                max(0.30, min(0.95, over15)),
                 'Soccer safe-market guardrail replaced handicap with goals envelope.',
             ),
             (
                 'DOUBLE_CHANCE',
                 '1X',
-                max(0.35, min(0.99, float(probabilities.double_chance_1x))),
+                max(0.35, min(0.99, one_x)),
                 'Soccer safe-market guardrail replaced handicap with double chance coverage.',
             ),
             (
                 'DOUBLE_CHANCE',
                 'X2',
-                max(0.35, min(0.99, float(probabilities.double_chance_x2))),
+                max(0.35, min(0.99, x2)),
                 'Soccer safe-market guardrail replaced handicap with double chance coverage.',
             ),
         ]
@@ -569,6 +598,17 @@ class PicksService:
             confidence=round(confidence, 4),
             implied_odds=self._safe_odds_from_confidence(confidence),
             rationale=rationale,
+        )
+
+    def _build_explain_fragment(self, *, match: MatchCandidate) -> str:
+        return (
+            '[Explain: '
+            f'h2h_n={match.h2h_sample_size}; '
+            f'h2h={match.h2h_home_win_rate:.2f}/{match.h2h_draw_rate:.2f}/{match.h2h_away_win_rate:.2f}; '
+            f'recent5_scored={match.home_recent5_scored_rate:.2f}/{match.away_recent5_scored_rate:.2f}; '
+            f'recent5_gd={match.home_recent5_goal_diff:.2f}/{match.away_recent5_goal_diff:.2f}; '
+            f'opp_strength={match.home_recent5_opponent_strength:.2f}/{match.away_recent5_opponent_strength:.2f}'
+            ']'
         )
 
     def _should_skip_match_for_prediction(

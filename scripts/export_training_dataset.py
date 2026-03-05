@@ -28,6 +28,13 @@ FEATURE_NAMES = [
     "fatigue_level",
     "weather_impact",
     "home_edge",
+    "h2h_sample_size",
+    "home_recent5_scored_rate",
+    "away_recent5_scored_rate",
+    "home_recent5_goal_diff",
+    "away_recent5_goal_diff",
+    "home_recent5_opponent_strength",
+    "away_recent5_opponent_strength",
 ]
 
 
@@ -36,6 +43,8 @@ class TeamGame:
     kick_off_utc: datetime
     goals_for: int
     goals_against: int
+    opponent_team: str
+    is_home: bool
 
 
 def normalize_team_name(name: str) -> str:
@@ -102,41 +111,76 @@ def compute_fatigue(games: Iterable[TeamGame], reference: datetime) -> float:
     return clamp(recent_count / 7.0, 0.05, 0.95)
 
 
+def compute_recent5_profile(
+    *,
+    sport: Sport,
+    games: list[TeamGame],
+    team_history: dict[tuple[str, str], list[TeamGame]],
+    lookback: int,
+) -> dict[str, float]:
+    if not games:
+        return {
+            "scored_rate": 0.5,
+            "goal_diff": 0.0,
+            "opponent_strength": 0.5,
+        }
+
+    sample = recent_games(games, lookback)
+    scored = sum(1 for game in sample if game.goals_for > 0)
+    goal_diff = sum(game.goals_for - game.goals_against for game in sample) / len(sample)
+
+    strength_values: list[float] = []
+    for game in sample:
+        key = (sport.value, game.opponent_team)
+        opp_games = recent_games(team_history.get(key, []), 10)
+        strength_values.append(compute_form_index(opp_games, sport))
+
+    opponent_strength = sum(strength_values) / len(strength_values) if strength_values else 0.5
+    return {
+        "scored_rate": clamp(scored / len(sample), 0.0, 1.0),
+        "goal_diff": goal_diff,
+        "opponent_strength": clamp(opponent_strength, 0.0, 1.0),
+    }
+
+
 def compute_h2h(
     h2h_rows: list[tuple[str, str, int, int]],
     current_home_team: str,
     sport: Sport,
-) -> tuple[float, float, float]:
+) -> tuple[float, float, float, int]:
     if not h2h_rows:
         # fallback to neutral h2h when no prior pair history exists
         if sport == Sport.BASKETBALL:
-            return 0.5, 0.01, 0.49
-        return 0.42, 0.18, 0.40
+            return 0.5, 0.01, 0.49, 0
+        return 0.42, 0.18, 0.40, 0
 
-    home_wins = 0
-    away_wins = 0
-    draws = 0
-    for home_team, away_team, home_score, away_score in h2h_rows:
+    home_wins = 0.0
+    away_wins = 0.0
+    draws = 0.0
+    ordered = list(reversed(h2h_rows))  # newest first
+    for idx, (home_team, away_team, home_score, away_score) in enumerate(ordered):
+        weight = 1.0 / (1.0 + idx * 0.35)
         if home_score == away_score:
-            draws += 1
+            draws += weight
             continue
         winner = home_team if home_score > away_score else away_team
         if winner == current_home_team:
-            home_wins += 1
+            home_wins += weight
         else:
-            away_wins += 1
+            away_wins += weight
 
-    total = max(1, home_wins + away_wins + draws)
+    total = max(0.01, home_wins + away_wins + draws)
     if sport == Sport.BASKETBALL:
         draw_rate = 0.01
         home_rate = clamp(home_wins / total, 0.05, 0.95)
         away_rate = clamp(away_wins / total, 0.04, 0.95)
         remap = max(home_rate + away_rate, 0.01)
-        return home_rate / remap, draw_rate, away_rate / remap
+        return home_rate / remap, draw_rate, away_rate / remap, len(h2h_rows)
     return (
         clamp(home_wins / total, 0.08, 0.9),
         clamp(draws / total, 0.05, 0.45),
         clamp(away_wins / total, 0.05, 0.9),
+        len(h2h_rows),
     )
 
 
@@ -314,9 +358,21 @@ def main() -> None:
             injury_impact = clamp((fatigue * 5.0 + ((home_vol + away_vol) / 2) * 2.0), 0.0, 10.0)
             weather_impact = clamp((2.0 + home_vol * 1.5) if sport == Sport.SOCCER else 1.0, 0.0, 10.0)
 
-            h2h_home, h2h_draw, h2h_away = compute_h2h(pair_prior, row.home_team, sport)
+            h2h_home, h2h_draw, h2h_away, h2h_sample = compute_h2h(pair_prior, row.home_team, sport)
             home_edge = home_form - away_form
             target_class = target_class_for_match(sport, row.home_score, row.away_score)
+            home_recent = compute_recent5_profile(
+                sport=sport,
+                games=home_prior,
+                team_history=team_history,
+                lookback=5,
+            )
+            away_recent = compute_recent5_profile(
+                sport=sport,
+                games=away_prior,
+                team_history=team_history,
+                lookback=5,
+            )
             label_key = (
                 row.kick_off_utc.date().isoformat(),
                 sport.value,
@@ -340,6 +396,13 @@ def main() -> None:
                     "fatigue_level": round(fatigue, 6),
                     "weather_impact": round(weather_impact / 10, 6),
                     "home_edge": round(home_edge, 6),
+                    "h2h_sample_size": round(min(1.0, h2h_sample / 20.0), 6),
+                    "home_recent5_scored_rate": round(home_recent["scored_rate"], 6),
+                    "away_recent5_scored_rate": round(away_recent["scored_rate"], 6),
+                    "home_recent5_goal_diff": round(clamp((home_recent["goal_diff"] + 5.0) / 10.0, 0.0, 1.0), 6),
+                    "away_recent5_goal_diff": round(clamp((away_recent["goal_diff"] + 5.0) / 10.0, 0.0, 1.0), 6),
+                    "home_recent5_opponent_strength": round(home_recent["opponent_strength"], 6),
+                    "away_recent5_opponent_strength": round(away_recent["opponent_strength"], 6),
                     "target_class": target_class,
                 }
             )
@@ -349,6 +412,8 @@ def main() -> None:
                 kick_off_utc=row.kick_off_utc,
                 goals_for=row.home_score,
                 goals_against=row.away_score,
+                opponent_team=row.away_team,
+                is_home=True,
             )
         )
         team_history[away_key].append(
@@ -356,6 +421,8 @@ def main() -> None:
                 kick_off_utc=row.kick_off_utc,
                 goals_for=row.away_score,
                 goals_against=row.home_score,
+                opponent_team=row.home_team,
+                is_home=False,
             )
         )
         h2h_history[pair_key].append((row.home_team, row.away_team, row.home_score, row.away_score))

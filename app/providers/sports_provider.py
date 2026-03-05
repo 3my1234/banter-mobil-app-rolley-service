@@ -31,6 +31,8 @@ class SportsDataProvider:
         self._provider = (self._settings.sports_provider or 'ESPN').strip().upper()
         self._injury_cache: dict[tuple[str, str, str], tuple[int, bool]] = {}
         self._standings_cache: dict[tuple[str, str], dict[str, dict[str, float | int | str]]] = {}
+        self._recent_form_cache: dict[tuple[str, str, str], dict[str, float]] = {}
+        self._opponent_strength_cache: dict[tuple[str, str, str], float] = {}
         self._api_football = APIFootballProvider()
         self._football_data = FootballDataProvider()
 
@@ -215,15 +217,23 @@ class SportsDataProvider:
         away_form = max(0.05, min(0.95, away_form - injury_penalty_away + injury_penalty_home * 0.35))
 
         has_h2h_data = False
-        h2h = self._compute_h2h_from_history(db=db, sport=sport, home_team=str(home_team), away_team=str(away_team))
+        h2h_sample_size = 0
+        h2h = self._compute_h2h_from_history(
+            db=db,
+            sport=sport,
+            home_team=str(home_team),
+            away_team=str(away_team),
+            max_matches=20,
+        )
         if h2h is not None:
             data_sources.append('local:h2h')
             has_h2h_data = True
+            h2h_sample_size = int(h2h[3])
         if h2h is None and sport == Sport.SOCCER:
             fallback_h2h = None
             if enriched is not None and isinstance(enriched.get('h2h'), (list, tuple)) and len(enriched['h2h']) == 3:
                 item = enriched['h2h']
-                fallback_h2h = (float(item[0]), float(item[1]), float(item[2]))
+                fallback_h2h = (float(item[0]), float(item[1]), float(item[2]), 0)
             if fallback_h2h is None:
                 fallback_h2h = self._get_soccer_h2h_fallback(
                     competition=competition,
@@ -236,9 +246,28 @@ class SportsDataProvider:
                 data_sources.append('fallback:h2h')
                 has_h2h_data = True
         if h2h is None:
-            h2h = self._strength_based_h2h(home_form=home_form, away_form=away_form, sport=sport)
+            base = self._strength_based_h2h(home_form=home_form, away_form=away_form, sport=sport)
+            h2h = (base[0], base[1], base[2], 0)
             data_sources.append('heuristic:h2h')
-        home_h2h, draw, away_h2h = h2h
+        home_h2h, draw, away_h2h, h2h_count = h2h
+        h2h_sample_size = max(h2h_sample_size, int(h2h_count))
+
+        recent_home = self._compute_recent_team_form(
+            db=db,
+            sport=sport,
+            team_name=str(home_team),
+            reference_time=kickoff,
+            lookback=5,
+        )
+        recent_away = self._compute_recent_team_form(
+            db=db,
+            sport=sport,
+            team_name=str(away_team),
+            reference_time=kickoff,
+            lookback=5,
+        )
+        if recent_home.get('sample_size', 0) >= 3 and recent_away.get('sample_size', 0) >= 3:
+            data_sources.append('local:recent5')
 
         completeness = self._completeness_score(
             sport=sport,
@@ -261,8 +290,15 @@ class SportsDataProvider:
             h2h_home_win_rate=round(home_h2h, 4),
             h2h_draw_rate=round(draw, 4),
             h2h_away_win_rate=round(away_h2h, 4),
+            h2h_sample_size=h2h_sample_size,
             home_form_index=round(home_form, 4),
             away_form_index=round(away_form, 4),
+            home_recent5_scored_rate=round(float(recent_home.get('scored_rate', 0.5)), 4),
+            away_recent5_scored_rate=round(float(recent_away.get('scored_rate', 0.5)), 4),
+            home_recent5_goal_diff=round(float(recent_home.get('goal_diff_avg', 0.0)), 4),
+            away_recent5_goal_diff=round(float(recent_away.get('goal_diff_avg', 0.0)), 4),
+            home_recent5_opponent_strength=round(float(recent_home.get('opponent_strength', 0.5)), 4),
+            away_recent5_opponent_strength=round(float(recent_away.get('opponent_strength', 0.5)), 4),
             home_table_position=int(home_table.get('position')) if home_table.get('position') else None,
             away_table_position=int(away_table.get('position')) if away_table.get('position') else None,
             home_points=int(home_table.get('points')) if home_table.get('points') is not None else None,
@@ -336,7 +372,7 @@ class SportsDataProvider:
         home_team: str,
         away_team: str,
         max_matches: int = 10,
-    ) -> tuple[float, float, float] | None:
+    ) -> tuple[float, float, float, int] | None:
         if db is None:
             return None
 
@@ -356,21 +392,23 @@ class SportsDataProvider:
         if len(rows) < 2:
             return None
 
-        home_wins = 0
-        away_wins = 0
-        draws = 0
-        for row in rows:
+        home_wins = 0.0
+        away_wins = 0.0
+        draws = 0.0
+        for idx, row in enumerate(rows):
+            # Recency weighting: newest result has highest weight.
+            weight = 1.0 / (1.0 + idx * 0.35)
             if row.home_score == row.away_score:
-                draws += 1
+                draws += weight
                 continue
 
             winner = row.home_team if row.home_score > row.away_score else row.away_team
             if winner == home_team:
-                home_wins += 1
+                home_wins += weight
             else:
-                away_wins += 1
+                away_wins += weight
 
-        total = max(1, home_wins + away_wins + draws)
+        total = max(0.01, home_wins + away_wins + draws)
         if sport == Sport.BASKETBALL:
             home_rate = home_wins / total
             away_rate = away_wins / total
@@ -382,13 +420,149 @@ class SportsDataProvider:
                 max(0.05, min(0.95, home_rate)),
                 draw_rate,
                 max(0.04, min(0.95, away_rate)),
+                len(rows),
             )
 
         return (
             max(0.08, min(0.9, home_wins / total)),
             max(0.05, min(0.45, draws / total)),
             max(0.05, min(0.9, away_wins / total)),
+            len(rows),
         )
+
+    def _compute_recent_team_form(
+        self,
+        *,
+        db: Session | None,
+        sport: Sport,
+        team_name: str,
+        reference_time: datetime,
+        lookback: int = 5,
+    ) -> dict[str, float]:
+        if db is None:
+            return {
+                'sample_size': 0,
+                'scored_rate': 0.5,
+                'goal_diff_avg': 0.0,
+                'opponent_strength': 0.5,
+            }
+
+        cache_key = (sport.value, team_name.lower(), reference_time.date().isoformat())
+        cached = self._recent_form_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        rows = db.scalars(
+            select(MatchHistory)
+            .where(
+                MatchHistory.sport == sport.value,
+                MatchHistory.kick_off_utc < reference_time,
+                or_(MatchHistory.home_team == team_name, MatchHistory.away_team == team_name),
+            )
+            .order_by(MatchHistory.kick_off_utc.desc())
+            .limit(max(1, lookback))
+        ).all()
+
+        sample_size = len(rows)
+        if sample_size == 0:
+            result = {
+                'sample_size': 0,
+                'scored_rate': 0.5,
+                'goal_diff_avg': 0.0,
+                'opponent_strength': 0.5,
+            }
+            self._recent_form_cache[cache_key] = result
+            return result
+
+        scored = 0
+        goal_diff_total = 0.0
+        opponent_strength_total = 0.0
+        home_games = 0
+        away_games = 0
+        home_scored = 0
+        away_scored = 0
+        for row in rows:
+            is_home = row.home_team == team_name
+            goals_for = row.home_score if is_home else row.away_score
+            goals_against = row.away_score if is_home else row.home_score
+            opponent = row.away_team if is_home else row.home_team
+            if goals_for > 0:
+                scored += 1
+                if is_home:
+                    home_scored += 1
+                else:
+                    away_scored += 1
+            if is_home:
+                home_games += 1
+            else:
+                away_games += 1
+            goal_diff_total += (goals_for - goals_against)
+            opponent_strength_total += self._opponent_form_before_match(
+                db=db,
+                sport=sport,
+                team_name=opponent,
+                cutoff=row.kick_off_utc,
+            )
+
+        result = {
+            'sample_size': float(sample_size),
+            'scored_rate': max(0.0, min(1.0, scored / sample_size)),
+            'goal_diff_avg': goal_diff_total / sample_size,
+            'opponent_strength': max(0.0, min(1.0, opponent_strength_total / sample_size)),
+            'home_scored_rate': (home_scored / home_games) if home_games > 0 else 0.5,
+            'away_scored_rate': (away_scored / away_games) if away_games > 0 else 0.5,
+        }
+        self._recent_form_cache[cache_key] = result
+        return result
+
+    def _opponent_form_before_match(
+        self,
+        *,
+        db: Session,
+        sport: Sport,
+        team_name: str,
+        cutoff: datetime,
+        lookback: int = 10,
+    ) -> float:
+        cache_key = (sport.value, team_name.lower(), cutoff.date().isoformat())
+        cached = self._opponent_strength_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        rows = db.scalars(
+            select(MatchHistory)
+            .where(
+                MatchHistory.sport == sport.value,
+                MatchHistory.kick_off_utc < cutoff,
+                or_(MatchHistory.home_team == team_name, MatchHistory.away_team == team_name),
+            )
+            .order_by(MatchHistory.kick_off_utc.desc())
+            .limit(max(1, lookback))
+        ).all()
+        if not rows:
+            self._opponent_strength_cache[cache_key] = 0.5
+            return 0.5
+
+        points = 0.0
+        possible = 0.0
+        for row in rows:
+            is_home = row.home_team == team_name
+            goals_for = row.home_score if is_home else row.away_score
+            goals_against = row.away_score if is_home else row.home_score
+            if sport == Sport.SOCCER:
+                possible += 3.0
+                if goals_for > goals_against:
+                    points += 3.0
+                elif goals_for == goals_against:
+                    points += 1.0
+            else:
+                possible += 1.0
+                if goals_for > goals_against:
+                    points += 1.0
+
+        rating = max(0.0, min(1.0, points / possible)) if possible > 0 else 0.5
+        self._opponent_strength_cache[cache_key] = rating
+        return rating
 
     def _strength_based_h2h(self, *, home_form: float, away_form: float, sport: Sport) -> tuple[float, float, float]:
         home_h2h = max(0.15, min(0.82, 0.5 + (home_form - away_form) * 0.62))
@@ -496,7 +670,7 @@ class SportsDataProvider:
         target_date: datetime,
         home_team: str,
         away_team: str,
-    ) -> tuple[float, float, float] | None:
+    ) -> tuple[float, float, float, int] | None:
         enriched = self._enrich_soccer_fallback(
             competition=competition,
             target_date=target_date,
@@ -505,7 +679,7 @@ class SportsDataProvider:
         )
         h2h = enriched.get('h2h')
         if isinstance(h2h, (list, tuple)) and len(h2h) == 3:
-            return float(h2h[0]), float(h2h[1]), float(h2h[2])
+            return float(h2h[0]), float(h2h[1]), float(h2h[2]), 0
         return None
 
     def _completeness_score(

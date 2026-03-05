@@ -48,6 +48,11 @@ Replace providers with real feeds:
   - `BASKETBALL_EVENT_TIMEZONE=America/New_York`
 - `SPORTS_FALLBACK_TO_STUB=false` keeps production strict (no synthetic fixtures if provider has no same-day games).
 - ESPN enrichment now pulls standings/table context, injury counts, and stores completed matches in `rolley_match_history` for in-service H2H weighting.
+- Deep reasoning inputs now include:
+  - Recency-weighted pair H2H (`h2h_n` up to 20)
+  - Team recent-5 scoring and goal-difference signals
+  - Opponent-strength-adjusted recent-5 score
+  - Pick rationale includes an `Explain` fragment with these values
 - Optional fallbacks:
   - `API_FOOTBALL_ENABLED=true` with `API_FOOTBALL_KEY` and `API_FOOTBALL_HOST`
   - `FOOTBALL_DATA_ENABLED=true` with `FOOTBALL_DATA_KEY`

@@ -43,8 +43,15 @@ class MatchCandidate(BaseModel):
     h2h_home_win_rate: float = Field(ge=0, le=1)
     h2h_draw_rate: float = Field(ge=0, le=1)
     h2h_away_win_rate: float = Field(ge=0, le=1)
+    h2h_sample_size: int = 0
     home_form_index: float = Field(ge=0, le=1)
     away_form_index: float = Field(ge=0, le=1)
+    home_recent5_scored_rate: float = Field(default=0.5, ge=0, le=1)
+    away_recent5_scored_rate: float = Field(default=0.5, ge=0, le=1)
+    home_recent5_goal_diff: float = Field(default=0.0, ge=-10, le=10)
+    away_recent5_goal_diff: float = Field(default=0.0, ge=-10, le=10)
+    home_recent5_opponent_strength: float = Field(default=0.5, ge=0, le=1)
+    away_recent5_opponent_strength: float = Field(default=0.5, ge=0, le=1)
     home_table_position: int | None = None
     away_table_position: int | None = None
     home_points: int | None = None

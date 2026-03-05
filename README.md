@@ -58,6 +58,17 @@ Replace providers with real feeds:
   - `PREDICTION_MAX_PICKS_PER_SPORT` (default `3`)
   - `PREDICTION_EXCLUDE_STARTED_MATCHES=true`
   - `PREDICTION_START_BUFFER_MINUTES=0`
+- Soccer primary safety controls:
+  - `SOCCER_PRIMARY_PREFER_SAFE_MARKETS=true` (prefer `TOTAL_GOALS` / `DOUBLE_CHANCE` for primary)
+  - `SOCCER_PRIMARY_ALLOW_HANDICAP_FALLBACK=true`
+  - With safe-market preference enabled, soccer handicap decisions are auto-converted to safest available non-handicap market before persistence.
+- League risk controls:
+  - `TRUSTED_SOCCER_COMPETITIONS=...`
+  - `HIGH_RISK_SOCCER_COMPETITIONS=...`
+  - `TRUSTED_BASKETBALL_COMPETITIONS=...`
+  - `LEAGUE_RISK_BLOCK_HIGH_RISK_PRIMARY=true`
+  - `LEAGUE_RISK_CONFIDENCE_PENALTY=0.12`
+  - `LEAGUE_RISK_PENALIZE_UNTRUSTED=false`
 - Gemini key in env enriches urgency/volatility features.
 - Probability engine in `app/reasoning.py` loads trained XGBoost from `XGBOOST_MODEL_PATH`.
 
@@ -82,6 +93,20 @@ cd rolley-service
 python scripts/export_training_dataset.py --output data/historical_training.csv --lookback 12 --min-team-games 5
 python scripts/train_xgboost.py --dataset data/historical_training.csv --output models/rolley_xgb_v1.json --version xgb-v1
 ```
+
+Optional analyst feedback overrides during export:
+```bash
+python scripts/export_training_dataset.py --output data/historical_training.csv --labels-path data/analyst_labels.csv
+```
+
+`data/analyst_labels.csv` accepted columns:
+- `match_date` (or `pick_date` / `date`) in `YYYY-MM-DD`
+- `sport` (`SOCCER` or `BASKETBALL`)
+- `home_team`
+- `away_team`
+- either `target_class` (0-8) or (`market` + `selection`)
+
+Template file: `data/analyst_labels.example.csv`
 
 ## Cron
 Daily refresh runs at `CRON_HOUR_UTC:CRON_MINUTE_UTC` and stores picks.

@@ -33,6 +33,7 @@ class MatchContext(BaseModel):
 class MatchCandidate(BaseModel):
     external_match_id: str
     sport: Sport
+    competition_code: str | None = None
     league: str
     home_team: str
     away_team: str

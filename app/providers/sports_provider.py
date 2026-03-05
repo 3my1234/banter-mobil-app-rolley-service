@@ -251,6 +251,7 @@ class SportsDataProvider:
         return MatchCandidate(
             external_match_id=f'{sport.value}-{event_id}',
             sport=sport,
+            competition_code=competition,
             league=league,
             home_team=str(home_team),
             away_team=str(away_team),
@@ -764,6 +765,7 @@ class SportsDataProvider:
                 MatchCandidate(
                     external_match_id=f'{sport.value}-{target_date.date()}-{i + 1}',
                     sport=sport,
+                    competition_code='stub',
                     league=league,
                     home_team=home,
                     away_team=away,

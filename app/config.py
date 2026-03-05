@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     prediction_max_picks_per_sport: int = 3
     prediction_exclude_started_matches: bool = True
     prediction_start_buffer_minutes: int = 0
+    soccer_primary_prefer_safe_markets: bool = True
+    soccer_primary_allow_handicap_fallback: bool = True
+
+    trusted_soccer_competitions: str = 'eng.1,esp.1,ger.1,ita.1,fra.1,uefa.champions,uefa.europa,uefa.europa.conf,tur.1'
+    high_risk_soccer_competitions: str = 'vie.1,tur.2,tur.3'
+    trusted_basketball_competitions: str = 'nba'
+    league_risk_block_high_risk_primary: bool = True
+    league_risk_confidence_penalty: float = 0.12
+    league_risk_penalize_untrusted: bool = False
 
     xgboost_enabled: bool = True
     xgboost_model_path: str = './models/rolley_xgb_v1.json'

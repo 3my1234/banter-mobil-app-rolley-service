@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -35,6 +36,20 @@ class TeamGame:
     kick_off_utc: datetime
     goals_for: int
     goals_against: int
+
+
+def normalize_team_name(name: str) -> str:
+    normalized = re.sub(r'[^a-z0-9]+', ' ', name.lower()).strip()
+    return re.sub(r'\s+', ' ', normalized)
+
+
+def normalize_date_token(value: str) -> str:
+    token = value.strip()
+    if not token:
+        return ''
+    if 'T' in token:
+        token = token.split('T', 1)[0]
+    return token
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -147,17 +162,118 @@ def target_class_for_match(sport: Sport, home_score: int, away_score: int) -> in
     return 2
 
 
+def map_market_selection_to_target(*, sport: Sport, market: str, selection: str) -> int | None:
+    market_key = market.strip().upper()
+    selection_key = selection.strip().upper()
+
+    if sport == Sport.BASKETBALL:
+        if market_key in {'ALT_SPREAD', 'HANDICAP'}:
+            if selection_key.startswith('HOME +'):
+                return 7
+            if selection_key.startswith('AWAY +'):
+                return 8
+        return None
+
+    if market_key == 'TOTAL_GOALS':
+        if 'OVER 1.5' in selection_key:
+            return 4
+        if 'OVER 0.5' in selection_key:
+            return 3
+    if market_key == 'HANDICAP':
+        if selection_key.startswith('HOME +'):
+            return 5
+        if selection_key.startswith('AWAY +'):
+            return 6
+    if market_key == 'DOUBLE_CHANCE':
+        if selection_key == '1X':
+            return 0
+        if selection_key == 'X2':
+            return 2
+    if market_key == 'MATCH_RESULT':
+        if selection_key == 'HOME':
+            return 0
+        if selection_key in {'DRAW', 'X'}:
+            return 1
+        if selection_key == 'AWAY':
+            return 2
+    return None
+
+
+def load_analyst_labels(path: Path) -> dict[tuple[str, str, str, str], int]:
+    if not path.exists():
+        return {}
+
+    labels: dict[tuple[str, str, str, str], int] = {}
+    with path.open('r', encoding='utf-8', newline='') as handle:
+        reader = csv.DictReader(handle)
+        for raw in reader:
+            sport_token = str(raw.get('sport') or '').strip().upper()
+            if sport_token not in {Sport.SOCCER.value, Sport.BASKETBALL.value}:
+                continue
+            sport = Sport(sport_token)
+
+            date_token = normalize_date_token(
+                str(raw.get('match_date') or '').strip()
+                or str(raw.get('pick_date') or '').strip()
+                or str(raw.get('date') or '').strip()
+            )
+            home_team = str(raw.get('home_team') or '').strip()
+            away_team = str(raw.get('away_team') or '').strip()
+            if not date_token or not home_team or not away_team:
+                continue
+
+            target_class: int | None = None
+            target_raw = str(raw.get('target_class') or '').strip()
+            if target_raw:
+                try:
+                    target_class = int(target_raw)
+                except Exception:
+                    target_class = None
+
+            if target_class is None:
+                market = str(raw.get('market') or raw.get('analyst_market') or '').strip()
+                selection = str(raw.get('selection') or raw.get('analyst_selection') or '').strip()
+                if market and selection:
+                    target_class = map_market_selection_to_target(
+                        sport=sport,
+                        market=market,
+                        selection=selection,
+                    )
+
+            if target_class is None or target_class < 0:
+                continue
+
+            key = (
+                date_token,
+                sport.value,
+                normalize_team_name(home_team),
+                normalize_team_name(away_team),
+            )
+            labels[key] = target_class
+
+    return labels
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export historical training CSV from rolley_match_history.")
     parser.add_argument("--output", default="data/historical_training.csv", help="Output CSV path")
     parser.add_argument("--lookback", type=int, default=12, help="Recent match window per team")
     parser.add_argument("--min-team-games", type=int, default=5, help="Minimum prior games per team")
     parser.add_argument("--sports", default="SOCCER,BASKETBALL", help="Comma-separated sports subset")
+    parser.add_argument(
+        "--labels-path",
+        default="data/analyst_labels.csv",
+        help="Optional analyst labels CSV path (target_class or market/selection overrides)",
+    )
     args = parser.parse_args()
 
     selected_sports = {token.strip().upper() for token in args.sports.split(",") if token.strip()}
     if not selected_sports:
         selected_sports = {Sport.SOCCER.value, Sport.BASKETBALL.value}
+
+    labels_path = Path(args.labels_path)
+    analyst_labels = load_analyst_labels(labels_path)
+    labels_applied = 0
 
     init_db()
     db = SessionLocal()
@@ -201,6 +317,15 @@ def main() -> None:
             h2h_home, h2h_draw, h2h_away = compute_h2h(pair_prior, row.home_team, sport)
             home_edge = home_form - away_form
             target_class = target_class_for_match(sport, row.home_score, row.away_score)
+            label_key = (
+                row.kick_off_utc.date().isoformat(),
+                sport.value,
+                normalize_team_name(row.home_team),
+                normalize_team_name(row.away_team),
+            )
+            if label_key in analyst_labels:
+                target_class = analyst_labels[label_key]
+                labels_applied += 1
 
             output_rows.append(
                 {
@@ -243,8 +368,9 @@ def main() -> None:
         writer.writerows(output_rows)
 
     print(f"Exported {len(output_rows)} rows to {output_path}")
+    if analyst_labels:
+        print(f"Applied {labels_applied} analyst label override(s) from {labels_path}")
 
 
 if __name__ == "__main__":
     main()
-

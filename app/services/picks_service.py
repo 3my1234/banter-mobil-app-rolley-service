@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_FLOOR
 from uuid import uuid4
@@ -12,7 +13,7 @@ from ..config import get_settings
 from ..models import MatchHistory, PickRecord, PickSettlement, StakeDailyResult, StakePosition
 from ..providers.gemini_client import GeminiContextClient
 from ..providers.sports_provider import SportsDataProvider
-from ..reasoning import ProbabilityEngine, RolleyDecisionEngine
+from ..reasoning import Decision, ProbabilityEngine, RolleyDecisionEngine
 from ..schemas import (
     AutoSettlementResponse,
     DailyPicksResponse,
@@ -33,6 +34,24 @@ from ..schemas import (
 
 ROL_DECIMALS = Decimal('100000000')
 TEN_PERCENT = Decimal('0.10')
+SAFE_SOCCER_PRIMARY_MARKETS = {'TOTAL_GOALS', 'DOUBLE_CHANCE'}
+
+
+@dataclass(frozen=True)
+class LeagueRiskProfile:
+    competition_code: str | None
+    is_high_risk: bool
+    is_trusted: bool
+    penalty: float
+
+
+@dataclass
+class StagedPrediction:
+    record: PickRecord
+    data_completeness: float
+    sport: Sport
+    competition_code: str | None
+    risk: LeagueRiskProfile
 
 
 def rol_to_raw(amount_rol: float | Decimal) -> str:
@@ -77,7 +96,7 @@ class PicksService:
             )
             db.flush()
 
-            staged: list[tuple[PickRecord, float]] = []
+            staged: list[StagedPrediction] = []
             for match in matches:
                 if self._should_skip_match_for_prediction(
                     target_date=target_date,
@@ -93,10 +112,20 @@ class PicksService:
                     probabilities=model_result.probabilities,
                     context=context,
                 )
+                decision = self._apply_soccer_market_guardrail(
+                    sport=sport,
+                    decision=decision,
+                    probabilities=model_result.probabilities,
+                )
+                league_risk = self._league_risk_profile(
+                    sport=sport,
+                    competition_code=match.competition_code,
+                )
+                total_penalty = min(0.35, match.confidence_penalty + league_risk.penalty)
                 confidence, implied_odds = self._apply_match_penalty(
                     decision_confidence=decision.confidence,
                     decision_implied_odds=decision.implied_odds,
-                    penalty=match.confidence_penalty,
+                    penalty=total_penalty,
                 )
                 rationale = decision.rationale
                 if match.confidence_penalty > 0:
@@ -105,6 +134,16 @@ class PicksService:
                         f'[Data completeness {match.data_completeness:.0%}; '
                         f'confidence penalty {match.confidence_penalty:.0%}; '
                         f'sources: {", ".join(match.data_sources)}]'
+                    )
+                if league_risk.penalty > 0:
+                    risk_reason = (
+                        f'high-risk competition ({league_risk.competition_code or "unknown"})'
+                        if league_risk.is_high_risk
+                        else f'untrusted competition ({league_risk.competition_code or "unknown"})'
+                    )
+                    rationale = (
+                        f'{rationale} '
+                        f'[League risk: {risk_reason}; confidence penalty {league_risk.penalty:.0%}]'
                     )
                 record = PickRecord(
                     id=str(uuid4()),
@@ -122,15 +161,23 @@ class PicksService:
                     rationale=rationale,
                     model_version=model_result.model_version,
                 )
-                staged.append((record, match.data_completeness))
+                staged.append(
+                    StagedPrediction(
+                        record=record,
+                        data_completeness=match.data_completeness,
+                        sport=sport,
+                        competition_code=match.competition_code,
+                        risk=league_risk,
+                    )
+                )
 
             if staged:
-                staged.sort(key=lambda item: item[0].confidence, reverse=True)
                 staged = self._filter_staged_predictions(staged=staged)
 
             if staged:
                 primary_ids = self._select_primary_ids(staged=staged)
-                for row, _completeness in staged:
+                for item in staged:
+                    row = item.record
                     row.is_primary = row.id in primary_ids
                     db.add(row)
                     db.add(
@@ -476,6 +523,54 @@ class PicksService:
         adjusted_odds = round(max(1.01, min(decision_implied_odds, adjusted_odds, 1.09)), 4)
         return adjusted_confidence, adjusted_odds
 
+    def _safe_odds_from_confidence(self, confidence: float) -> float:
+        odds = 1.01 + max(0.0, min(0.08, (confidence - 0.55) * 0.22))
+        return round(max(1.01, min(1.09, odds)), 4)
+
+    def _apply_soccer_market_guardrail(self, *, sport: Sport, decision: Decision, probabilities) -> Decision:
+        if sport != Sport.SOCCER:
+            return decision
+        if not self._settings.soccer_primary_prefer_safe_markets:
+            return decision
+        if decision.market.upper() != 'HANDICAP':
+            return decision
+
+        safe_candidates = [
+            (
+                'TOTAL_GOALS',
+                'Over 0.5',
+                max(0.35, min(0.99, float(probabilities.over_05))),
+                'Soccer safe-market guardrail replaced handicap with goals floor.',
+            ),
+            (
+                'TOTAL_GOALS',
+                'Over 1.5',
+                max(0.30, min(0.95, float(probabilities.over_15))),
+                'Soccer safe-market guardrail replaced handicap with goals envelope.',
+            ),
+            (
+                'DOUBLE_CHANCE',
+                '1X',
+                max(0.35, min(0.99, float(probabilities.double_chance_1x))),
+                'Soccer safe-market guardrail replaced handicap with double chance coverage.',
+            ),
+            (
+                'DOUBLE_CHANCE',
+                'X2',
+                max(0.35, min(0.99, float(probabilities.double_chance_x2))),
+                'Soccer safe-market guardrail replaced handicap with double chance coverage.',
+            ),
+        ]
+
+        market, selection, confidence, rationale = max(safe_candidates, key=lambda item: item[2])
+        return Decision(
+            market=market,
+            selection=selection,
+            confidence=round(confidence, 4),
+            implied_odds=self._safe_odds_from_confidence(confidence),
+            rationale=rationale,
+        )
+
     def _should_skip_match_for_prediction(
         self,
         *,
@@ -491,20 +586,67 @@ class PicksService:
         cutoff = now_utc + timedelta(minutes=buffer_minutes)
         return kick_off_utc <= cutoff
 
-    def _filter_staged_predictions(self, *, staged: list[tuple[PickRecord, float]]) -> list[tuple[PickRecord, float]]:
+    def _filter_staged_predictions(self, *, staged: list[StagedPrediction]) -> list[StagedPrediction]:
         min_confidence = max(0.0, min(0.99, float(self._settings.prediction_min_confidence)))
         max_picks = max(1, int(self._settings.prediction_max_picks_per_sport))
 
-        filtered = [item for item in staged if item[0].confidence >= min_confidence]
-        filtered.sort(key=lambda item: (item[0].confidence, item[1]), reverse=True)
+        filtered = [item for item in staged if item.record.confidence >= min_confidence]
+        filtered.sort(key=lambda item: (item.record.confidence, item.data_completeness), reverse=True)
         return filtered[:max_picks]
 
-    def _select_primary_ids(self, *, staged: list[tuple[PickRecord, float]]) -> set[str]:
+    def _select_primary_ids(self, *, staged: list[StagedPrediction]) -> set[str]:
         min_completeness = max(0.0, min(1.0, float(self._settings.primary_min_completeness)))
-        eligible = [item for item in staged if item[1] >= min_completeness]
+        eligible = [item for item in staged if item.data_completeness >= min_completeness]
         source = eligible if eligible else staged
-        source.sort(key=lambda item: (item[0].confidence, item[1]), reverse=True)
-        return {row.id for row, _completeness in source[: self._settings.primary_pick_count]}
+        if not source:
+            return set()
+
+        if self._settings.league_risk_block_high_risk_primary:
+            non_high_risk = [item for item in source if not item.risk.is_high_risk]
+            if non_high_risk:
+                source = non_high_risk
+
+        is_soccer = source[0].sport == Sport.SOCCER
+        if is_soccer and self._settings.soccer_primary_prefer_safe_markets:
+            safe = [item for item in source if item.record.market.upper() in SAFE_SOCCER_PRIMARY_MARKETS]
+            if safe:
+                source = safe
+            elif not self._settings.soccer_primary_allow_handicap_fallback:
+                return set()
+
+        source.sort(key=lambda item: (item.record.confidence, item.data_completeness), reverse=True)
+        return {item.record.id for item in source[: self._settings.primary_pick_count]}
+
+    def _league_risk_profile(self, *, sport: Sport, competition_code: str | None) -> LeagueRiskProfile:
+        code = (competition_code or '').strip().lower() or None
+        penalty = max(0.0, min(0.25, float(self._settings.league_risk_confidence_penalty)))
+
+        high_risk_set: set[str] = set()
+        trusted_set: set[str] = set()
+        if sport == Sport.SOCCER:
+            high_risk_set = self._parse_competition_set(self._settings.high_risk_soccer_competitions)
+            trusted_set = self._parse_competition_set(self._settings.trusted_soccer_competitions)
+        elif sport == Sport.BASKETBALL:
+            trusted_set = self._parse_competition_set(self._settings.trusted_basketball_competitions)
+
+        is_high_risk = bool(code and code in high_risk_set)
+        is_trusted = bool(code and code in trusted_set) if trusted_set else True
+
+        applied_penalty = 0.0
+        if is_high_risk:
+            applied_penalty = penalty
+        elif self._settings.league_risk_penalize_untrusted and not is_trusted:
+            applied_penalty = penalty
+
+        return LeagueRiskProfile(
+            competition_code=code,
+            is_high_risk=is_high_risk,
+            is_trusted=is_trusted,
+            penalty=applied_penalty,
+        )
+
+    def _parse_competition_set(self, raw: str) -> set[str]:
+        return {item.strip().lower() for item in raw.split(',') if item.strip()}
 
     def _evaluate_pick_outcome(self, *, pick: PickRecord, history: MatchHistory) -> SettlementOutcome:
         market = (pick.market or '').upper()

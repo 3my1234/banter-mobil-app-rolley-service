@@ -1,0 +1,4 @@
+match_date,sport,home_team,away_team,market,selection,target_class,notes
+2026-03-04,SOCCER,Aston Villa,Chelsea,TOTAL_GOALS,Over 0.5,,override risky handicap with safer goal floor
+2026-03-05,BASKETBALL,Miami Heat,Brooklyn Nets,ALT_SPREAD,Away +8.5,,analyst preferred spread
+2026-03-06,SOCCER,Arsenal,Liverpool,,,3,direct class override (3 = over 0.5)

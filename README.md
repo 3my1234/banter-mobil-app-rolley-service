@@ -99,6 +99,22 @@ python scripts/export_training_dataset.py --output data/historical_training.csv 
 python scripts/train_xgboost.py --dataset data/historical_training.csv --output models/rolley_xgb_v1.json --version xgb-v1
 ```
 
+## Champion vs challenger promotion gate
+Dry-run gate:
+```bash
+python scripts/promote_candidate_model.py --candidate-model ./models/rolley_xgb_v2_deep.json --days 7 --min-settled 20 --min-improvement 0.02
+```
+
+Promote only if gate passes:
+```bash
+python scripts/promote_candidate_model.py --candidate-model ./models/rolley_xgb_v2_deep.json --days 7 --min-settled 20 --min-improvement 0.02 --promote
+```
+
+Notes:
+- Uses settled **primary** picks in the evaluation window.
+- Writes a JSON report (champion/candidate win-rate + improvement).
+- On `--promote`, updates `.env` `XGBOOST_MODEL_PATH` and creates an env backup.
+
 Optional analyst feedback overrides during export:
 ```bash
 python scripts/export_training_dataset.py --output data/historical_training.csv --labels-path data/analyst_labels.csv

@@ -507,7 +507,7 @@ class SportsDataProvider:
         result = {
             'sample_size': float(sample_size),
             'scored_rate': max(0.0, min(1.0, scored / sample_size)),
-            'goal_diff_avg': goal_diff_total / sample_size,
+            'goal_diff_avg': max(-10.0, min(10.0, goal_diff_total / sample_size)),
             'opponent_strength': max(0.0, min(1.0, opponent_strength_total / sample_size)),
             'home_scored_rate': (home_scored / home_games) if home_games > 0 else 0.5,
             'away_scored_rate': (away_scored / away_games) if away_games > 0 else 0.5,

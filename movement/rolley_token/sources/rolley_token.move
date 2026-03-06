@@ -88,18 +88,21 @@ module rolley_token::rolley_token {
     public entry fun mint_initial_supply(admin: &signer, treasury: address) acquires ManagedFungibleAsset, TreasuryState {
         assert_admin(admin);
 
-        let state = borrow_global_mut<TreasuryState>(@rolley_token);
         assert!(
-            !state.initial_supply_minted,
+            !borrow_global<TreasuryState>(@rolley_token).initial_supply_minted,
             error::already_exists(EINITIAL_SUPPLY_ALREADY_MINTED)
         );
 
         let asset = get_metadata();
-        let managed_asset = authorized_borrow_refs(admin, asset);
         let treasury_store = primary_fungible_store::ensure_primary_store_exists(treasury, asset);
-        let minted = fungible_asset::mint(&managed_asset.mint_ref, INITIAL_SUPPLY);
-        fungible_asset::deposit_with_ref(&managed_asset.transfer_ref, treasury_store, minted);
+        let asset_address = metadata_address();
+        {
+            let managed_asset = borrow_global<ManagedFungibleAsset>(asset_address);
+            let minted = fungible_asset::mint(&managed_asset.mint_ref, INITIAL_SUPPLY);
+            fungible_asset::deposit_with_ref(&managed_asset.transfer_ref, treasury_store, minted);
+        };
 
+        let state = borrow_global_mut<TreasuryState>(@rolley_token);
         state.treasury = treasury;
         state.initial_supply_minted = true;
     }
@@ -108,8 +111,9 @@ module rolley_token::rolley_token {
         assert_admin(admin);
 
         let asset = get_metadata();
-        let managed_asset = authorized_borrow_refs(admin, asset);
         let recipient_store = primary_fungible_store::ensure_primary_store_exists(to, asset);
+        let asset_address = metadata_address();
+        let managed_asset = borrow_global<ManagedFungibleAsset>(asset_address);
         let minted = fungible_asset::mint(&managed_asset.mint_ref, amount);
         fungible_asset::deposit_with_ref(&managed_asset.transfer_ref, recipient_store, minted);
     }
@@ -118,7 +122,8 @@ module rolley_token::rolley_token {
         assert_admin(admin);
 
         let asset = get_metadata();
-        let managed_asset = authorized_borrow_refs(admin, asset);
+        let asset_address = metadata_address();
+        let managed_asset = borrow_global<ManagedFungibleAsset>(asset_address);
         let withdrawn = primary_fungible_store::withdraw(admin, asset, amount);
         fungible_asset::burn(&managed_asset.burn_ref, withdrawn);
     }
@@ -135,13 +140,5 @@ module rolley_token::rolley_token {
             signer::address_of(admin) == state.treasury,
             error::permission_denied(ENOT_ADMIN)
         );
-    }
-
-    fun authorized_borrow_refs(
-        admin: &signer,
-        asset: Object<Metadata>,
-    ): &ManagedFungibleAsset acquires ManagedFungibleAsset, TreasuryState {
-        assert_admin(admin);
-        borrow_global<ManagedFungibleAsset>(object::object_address(&asset))
     }
 }

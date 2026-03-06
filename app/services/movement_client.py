@@ -54,10 +54,6 @@ class MovementClient:
         if not self.enabled:
             return MovementCreateResult(pick_id=0, tx_hash=None, status='DISABLED')
 
-        existing_pick_id = await self._pick_id_for_external_match(self._movement_external_id(pick))
-        if existing_pick_id > 0:
-            return MovementCreateResult(pick_id=existing_pick_id, tx_hash=None, status='EXISTS')
-
         payload = EntryFunction.natural(
             f'{self._settings.movement_settlement_module_address}::rolley_settlement',
             'create_pick',
@@ -70,10 +66,11 @@ class MovementClient:
                 TransactionArgument(self._as_timestamp(pick.created_at), Serializer.u64),
             ],
         )
+        previous_count = await self._pick_count()
         tx_hash = await self._submit(payload)
-        pick_id = await self._pick_id_for_external_match(self._movement_external_id(pick))
-        if pick_id <= 0:
-            raise RuntimeError(f'Movement create_pick succeeded but no pick id was resolvable for {pick.id}')
+        pick_id = await self._pick_count()
+        if pick_id <= previous_count:
+            raise RuntimeError(f'Movement create_pick succeeded but pick count did not advance for {pick.id}')
         return MovementCreateResult(pick_id=pick_id, tx_hash=tx_hash, status='CREATED')
 
     async def settle_pick(self, *, movement_pick_id: int, outcome: SettlementOutcome, settled_at: datetime | None) -> MovementSettlementResult:
@@ -104,12 +101,12 @@ class MovementClient:
         tx_hash = await self._submit(settle_payload)
         return MovementSettlementResult(tx_hash=tx_hash, status='SETTLED')
 
-    async def _pick_id_for_external_match(self, external_match_id: str) -> int:
+    async def _pick_count(self) -> int:
         client = self._client()
         result = await client.view(
-            f'{self._settings.movement_settlement_module_address}::rolley_settlement::pick_id_for_external_match',
+            f'{self._settings.movement_settlement_module_address}::rolley_settlement::pick_count',
             [],
-            [external_match_id.encode('utf-8').hex()],
+            [],
         )
         if not result:
             return 0
@@ -133,9 +130,6 @@ class MovementClient:
             assert self._settings.movement_private_key
             self._account = Account.load_key(self._settings.movement_private_key)
         return self._account
-
-    def _movement_external_id(self, pick: PickRecord) -> str:
-        return f'{pick.pick_date.isoformat()}::{pick.sport}::{pick.external_match_id}'
 
     def _metadata_uri(self, pick: PickRecord) -> str:
         base = self._settings.movement_pick_metadata_base_url.rstrip('/')

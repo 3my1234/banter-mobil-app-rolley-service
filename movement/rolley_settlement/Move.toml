@@ -1,0 +1,17 @@
+[package]
+name = "rolley_settlement"
+version = "0.1.0"
+authors = ["Emma / Banter"]
+
+[addresses]
+rolley_settlement = "_"
+rolley_token = "_"
+aptos_framework = "0x1"
+
+[dependencies.AptosFramework]
+git = "https://github.com/aptos-labs/aptos-core.git"
+rev = "fb9e2f4"
+subdir = "aptos-move/framework/aptos-framework"
+
+[dependencies.rolley_token]
+local = "../rolley_token"

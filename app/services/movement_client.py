@@ -135,6 +135,9 @@ class MovementClient:
         base = self._settings.movement_pick_metadata_base_url.rstrip('/')
         return f'{base}/{pick.id}'
 
+    def _movement_external_id(self, pick: PickRecord) -> str:
+        return f'{pick.pick_date.isoformat()}::{pick.sport}::{pick.external_match_id}'
+
     def _as_timestamp(self, value: datetime) -> int:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)

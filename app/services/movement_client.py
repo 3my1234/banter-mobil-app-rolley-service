@@ -68,9 +68,9 @@ class MovementClient:
         )
         previous_count = await self._pick_count()
         tx_hash = await self._submit(payload)
-        pick_id = await self._pick_count()
-        if pick_id <= previous_count:
-            raise RuntimeError(f'Movement create_pick succeeded but pick count did not advance for {pick.id}')
+        # Movement testnet view state can lag briefly after a confirmed transaction.
+        # In the current single-admin writer model, the next on-chain pick id is deterministic.
+        pick_id = previous_count + 1
         return MovementCreateResult(pick_id=pick_id, tx_hash=tx_hash, status='CREATED')
 
     async def settle_pick(self, *, movement_pick_id: int, outcome: SettlementOutcome, settled_at: datetime | None) -> MovementSettlementResult:

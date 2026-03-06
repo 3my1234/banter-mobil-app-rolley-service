@@ -35,6 +35,9 @@ class PickRecord(Base):
     rationale: Mapped[str] = mapped_column(Text)
     model_version: Mapped[str] = mapped_column(String(64))
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    movement_pick_id: Mapped[int | None] = mapped_column(Integer, default=None, index=True)
+    movement_tx_hash: Mapped[str | None] = mapped_column(String(120), default=None)
+    movement_sync_status: Mapped[str | None] = mapped_column(String(24), default=None, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     settlement: Mapped['PickSettlement | None'] = relationship(
@@ -58,6 +61,7 @@ class PickSettlement(Base):
     notes: Mapped[str | None] = mapped_column(Text, default=None)
     settled_by: Mapped[str | None] = mapped_column(String(120), default=None)
     settled_at: Mapped[datetime | None] = mapped_column(DateTime, default=None)
+    movement_tx_hash: Mapped[str | None] = mapped_column(String(120), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     pick: Mapped[PickRecord] = relationship(back_populates='settlement')

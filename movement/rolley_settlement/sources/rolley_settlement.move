@@ -88,7 +88,25 @@ module rolley_settlement::rolley_settlement {
         let config = borrow_global<SettlementConfig>(@rolley_settlement);
         let pick_index = find_pick_index(&config.picks, pick_id);
         let pick = vector::borrow(&config.picks, pick_index);
+        if (pick.status != STATUS_SETTLED) {
+            return 0
+        };
         preview_claimable(pick, staker)
+    }
+
+    #[view]
+    public fun pick_id_for_external_match(external_match_id: vector<u8>): u64 acquires SettlementConfig {
+        let config = borrow_global<SettlementConfig>(@rolley_settlement);
+        let i = 0;
+        let i_mut = i;
+        while (i_mut < vector::length(&config.picks)) {
+            let pick = vector::borrow(&config.picks, i_mut);
+            if (&pick.external_match_id == &external_match_id) {
+                return pick.pick_id
+            };
+            i_mut = i_mut + 1;
+        };
+        0
     }
 
     public entry fun create_pick(

@@ -72,6 +72,15 @@ class Settings(BaseSettings):
         'home_recent5_opponent_strength,away_recent5_opponent_strength'
     )
 
+    movement_enabled: bool = False
+    movement_node_url: str = 'https://testnet.movementnetwork.xyz/v1'
+    movement_private_key: str | None = None
+    movement_account_address: str | None = None
+    movement_token_module_address: str | None = None
+    movement_settlement_module_address: str | None = None
+    movement_rol_metadata_address: str | None = None
+    movement_pick_metadata_base_url: str = 'https://sportbanter.online/rolley/picks'
+
 
 @lru_cache
 def get_settings() -> Settings:

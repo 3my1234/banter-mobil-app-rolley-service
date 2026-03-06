@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone, timedelta
@@ -14,6 +15,7 @@ from ..models import MatchHistory, PickRecord, PickSettlement, StakeDailyResult,
 from ..providers.gemini_client import GeminiContextClient
 from ..providers.sports_provider import SportsDataProvider
 from ..reasoning import Decision, ProbabilityEngine, RolleyDecisionEngine
+from .movement_client import MovementClient
 from ..schemas import (
     AutoSettlementResponse,
     DailyPicksResponse,
@@ -36,6 +38,7 @@ from ..schemas import (
 ROL_DECIMALS = Decimal('100000000')
 TEN_PERCENT = Decimal('0.10')
 SAFE_SOCCER_PRIMARY_MARKETS = {'TOTAL_GOALS', 'DOUBLE_CHANCE'}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -73,32 +76,41 @@ class PicksService:
         self._gemini = GeminiContextClient()
         self._probability = ProbabilityEngine()
         self._decision = RolleyDecisionEngine()
+        self._movement = MovementClient()
 
     async def refresh_daily_picks(self, db: Session, *, target_date: date) -> RefreshResponse:
         generated = 0
         now_utc = datetime.now(timezone.utc)
         for sport in [Sport.SOCCER, Sport.BASKETBALL]:
+            existing_rows = db.scalars(
+                select(PickRecord)
+                .options(joinedload(PickRecord.settlement))
+                .where(PickRecord.pick_date == target_date, PickRecord.sport == sport.value)
+            ).all()
+            preserved_match_ids = {
+                row.external_match_id for row in existing_rows
+                if self._movement.enabled and row.movement_pick_id is not None
+            }
+
             matches = self._sports.fetch_matches(
                 sport=sport,
                 target_date=datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc),
                 db=db,
             )
 
-            db.execute(
-                delete(PickSettlement).where(PickSettlement.pick_id.in_(
-                    select(PickRecord.id).where(PickRecord.pick_date == target_date, PickRecord.sport == sport.value)
-                ))
-            )
-            db.execute(
-                delete(PickRecord).where(
-                    PickRecord.pick_date == target_date,
-                    PickRecord.sport == sport.value,
-                )
-            )
+            delete_pick_ids = [
+                row.id for row in existing_rows
+                if not (self._movement.enabled and row.movement_pick_id is not None)
+            ]
+            if delete_pick_ids:
+                db.execute(delete(PickSettlement).where(PickSettlement.pick_id.in_(delete_pick_ids)))
+                db.execute(delete(PickRecord).where(PickRecord.id.in_(delete_pick_ids)))
             db.flush()
 
             staged: list[StagedPrediction] = []
             for match in matches:
+                if match.external_match_id in preserved_match_ids:
+                    continue
                 if self._should_skip_match_for_prediction(
                     target_date=target_date,
                     kick_off_utc=match.kick_off_utc,
@@ -194,6 +206,10 @@ class PicksService:
 
             db.commit()
 
+            if staged and self._movement.enabled:
+                for item in staged:
+                    await self._sync_pick_to_movement(db, pick_id=item.record.id)
+
         return RefreshResponse(success=True, date=target_date, generated=generated)
 
     def get_daily(self, db: Session, *, target_date: date, sport: Sport) -> DailyPicksResponse:
@@ -224,7 +240,7 @@ class PicksService:
         ).all()
         return [self._to_pick_view(row) for row in rows]
 
-    def settle_pick(self, db: Session, *, pick_id: str, payload: PickSettlementPayload) -> RolleyPick:
+    async def settle_pick(self, db: Session, *, pick_id: str, payload: PickSettlementPayload) -> RolleyPick:
         pick = db.scalar(select(PickRecord).where(PickRecord.id == pick_id).options(joinedload(PickRecord.settlement)))
         if not pick:
             raise ValueError('Pick not found')
@@ -245,6 +261,30 @@ class PicksService:
             self._apply_settlement_to_stakes(db, pick=pick, outcome=payload.outcome)
 
         db.commit()
+
+        if (
+            self._movement.enabled
+            and pick.movement_pick_id
+            and payload.outcome != SettlementOutcome.PENDING
+            and not settlement.movement_tx_hash
+        ):
+            try:
+                movement_result = await self._movement.settle_pick(
+                    movement_pick_id=pick.movement_pick_id,
+                    outcome=payload.outcome,
+                    settled_at=settlement.settled_at,
+                )
+                settlement.movement_tx_hash = movement_result.tx_hash
+                pick.movement_sync_status = movement_result.status
+                db.add(settlement)
+                db.add(pick)
+                db.commit()
+            except Exception as error:
+                logger.exception('Movement settle_pick failed for local pick %s', pick.id)
+                pick.movement_sync_status = 'SETTLE_FAILED'
+                db.add(pick)
+                db.commit()
+
         db.refresh(pick)
         return self._to_pick_view(pick)
 
@@ -266,7 +306,7 @@ class PicksService:
         ).all()
         return [self._to_pick_view(row) for row in rows]
 
-    def auto_settle_date(
+    async def auto_settle_date(
         self,
         db: Session,
         *,
@@ -330,6 +370,33 @@ class PicksService:
                 self._apply_settlement_to_stakes(db, pick=pick, outcome=outcome)
 
         db.commit()
+
+        if self._movement.enabled:
+            settled_rows = [
+                row for row in rows
+                if row.movement_pick_id
+                and row.settlement
+                and row.settlement.outcome != SettlementOutcome.PENDING.value
+                and not row.settlement.movement_tx_hash
+            ]
+            for row in settled_rows:
+                try:
+                    movement_result = await self._movement.settle_pick(
+                        movement_pick_id=row.movement_pick_id,
+                        outcome=SettlementOutcome(row.settlement.outcome),
+                        settled_at=row.settlement.settled_at,
+                    )
+                    row.settlement.movement_tx_hash = movement_result.tx_hash
+                    row.movement_sync_status = movement_result.status
+                    db.add(row)
+                    db.add(row.settlement)
+                    db.commit()
+                except Exception:
+                    logger.exception('Movement auto-settle failed for local pick %s', row.id)
+                    row.movement_sync_status = 'SETTLE_FAILED'
+                    db.add(row)
+                    db.commit()
+
         return AutoSettlementResponse(
             success=True,
             date=target_date,
@@ -761,11 +828,31 @@ class PicksService:
             rationale=row.rationale,
             model_version=row.model_version,
             is_primary=row.is_primary,
+            movement_pick_id=row.movement_pick_id,
+            movement_tx_hash=row.movement_tx_hash,
+            movement_sync_status=row.movement_sync_status,
             settlement_outcome=SettlementOutcome(outcome),
             settlement_notes=settlement.notes if settlement else None,
             settled_at=settlement.settled_at if settlement else None,
+            settlement_movement_tx_hash=settlement.movement_tx_hash if settlement else None,
             created_at=row.created_at,
         )
+
+    async def _sync_pick_to_movement(self, db: Session, *, pick_id: str) -> None:
+        pick = db.scalar(select(PickRecord).where(PickRecord.id == pick_id).options(joinedload(PickRecord.settlement)))
+        if not pick or pick.movement_pick_id is not None:
+            return
+        try:
+            result = await self._movement.ensure_pick(pick)
+            pick.movement_pick_id = result.pick_id
+            if result.tx_hash:
+                pick.movement_tx_hash = result.tx_hash
+            pick.movement_sync_status = result.status
+        except Exception:
+            logger.exception('Movement create_pick failed for local pick %s', pick.id)
+            pick.movement_sync_status = 'CREATE_FAILED'
+        db.add(pick)
+        db.commit()
 
     def _to_stake_view(self, row: StakePosition) -> StakePositionView:
         return StakePositionView(

@@ -99,9 +99,13 @@ class RolleyPick(BaseModel):
     rationale: str
     model_version: str
     is_primary: bool = False
+    movement_pick_id: int | None = None
+    movement_tx_hash: str | None = None
+    movement_sync_status: str | None = None
     settlement_outcome: SettlementOutcome = SettlementOutcome.PENDING
     settlement_notes: str | None = None
     settled_at: datetime | None = None
+    settlement_movement_tx_hash: str | None = None
     created_at: datetime
 
 

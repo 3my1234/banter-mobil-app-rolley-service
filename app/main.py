@@ -81,7 +81,7 @@ async def _run_auto_settlement() -> None:
     db = SessionLocal()
     try:
         target_date = date.today() - timedelta(days=max(settings.auto_settlement_offset_days, 1))
-        service.auto_settle_date(db, target_date=target_date, settled_by='AUTO_CRON')
+        await service.auto_settle_date(db, target_date=target_date, settled_by='AUTO_CRON')
     finally:
         db.close()
 
@@ -136,7 +136,7 @@ def get_admin_picks(
 
 
 @app.post(f'{settings.api_prefix}/admin/picks/{{pick_id}}/settle')
-def settle_pick(
+async def settle_pick(
     pick_id: str,
     payload: PickSettlementPayload = Body(...),
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
@@ -145,14 +145,14 @@ def settle_pick(
     if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
     try:
-        pick = service.settle_pick(db, pick_id=pick_id, payload=payload)
+        pick = await service.settle_pick(db, pick_id=pick_id, payload=payload)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return {'success': True, 'pick': pick}
 
 
 @app.post(f'{settings.api_prefix}/admin/picks/auto-settle', response_model=AutoSettlementResponse)
-def auto_settle_picks(
+async def auto_settle_picks(
     pick_date: date | None = Query(default=None),
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
@@ -160,7 +160,7 @@ def auto_settle_picks(
     if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
     target_date = pick_date or (date.today() - timedelta(days=max(settings.auto_settlement_offset_days, 1)))
-    return service.auto_settle_date(db, target_date=target_date, settled_by='ADMIN_AUTO')
+    return await service.auto_settle_date(db, target_date=target_date, settled_by='ADMIN_AUTO')
 
 
 @app.get(f'{settings.api_prefix}/stats/performance', response_model=PerformanceStatsResponse)

@@ -148,7 +148,7 @@ class StakeCreateRequest(BaseModel):
     user_id: str = Field(min_length=2, max_length=120)
     sport: Sport
     amount_rol: float = Field(gt=0)
-    lock_days: int = Field(ge=30, le=365)
+    lock_days: int = Field(ge=5, le=30)
 
 
 class StakePositionView(BaseModel):

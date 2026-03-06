@@ -45,6 +45,7 @@ class MovementClient:
         )
         self._rest_client: RestClient | None = None
         self._account: Account | None = None
+        self._last_known_pick_count: int | None = None
 
     @property
     def enabled(self) -> bool:
@@ -66,11 +67,10 @@ class MovementClient:
                 TransactionArgument(self._as_timestamp(pick.created_at), Serializer.u64),
             ],
         )
-        previous_count = await self._pick_count()
+        previous_count = await self._next_local_pick_count()
         tx_hash = await self._submit(payload)
-        # Movement testnet view state can lag briefly after a confirmed transaction.
-        # In the current single-admin writer model, the next on-chain pick id is deterministic.
         pick_id = previous_count + 1
+        self._last_known_pick_count = pick_id
         return MovementCreateResult(pick_id=pick_id, tx_hash=tx_hash, status='CREATED')
 
     async def settle_pick(self, *, movement_pick_id: int, outcome: SettlementOutcome, settled_at: datetime | None) -> MovementSettlementResult:
@@ -111,6 +111,11 @@ class MovementClient:
         if not result:
             return 0
         return int(result[0])
+
+    async def _next_local_pick_count(self) -> int:
+        if self._last_known_pick_count is None:
+            self._last_known_pick_count = await self._pick_count()
+        return self._last_known_pick_count
 
     async def _submit(self, payload: EntryFunction) -> str:
         client = self._client()

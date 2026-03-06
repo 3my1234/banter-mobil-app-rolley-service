@@ -9,5 +9,5 @@ aptos_framework = "0x1"
 
 [dependencies.AptosFramework]
 git = "https://github.com/aptos-labs/aptos-core.git"
-rev = "mainnet"
+rev = "fb9e2f4"
 subdir = "aptos-move/framework/aptos-framework"

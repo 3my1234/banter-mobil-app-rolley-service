@@ -41,6 +41,10 @@ movement move build \
   --named-addresses rolley_token=<YOUR_MOVEMENT_ADDRESS>
 ```
 
+This package is pinned to an older `aptos-core` commit because `movement`
+CLI `7.4.0` does not support the newer Move 2.2 syntax used by the latest
+framework head.
+
 Publish:
 
 ```bash

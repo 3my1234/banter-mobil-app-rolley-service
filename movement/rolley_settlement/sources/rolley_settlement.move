@@ -143,7 +143,7 @@ module rolley_settlement::rolley_settlement {
             assert!(pick.status == STATUS_OPEN, error::invalid_state(EPICK_NOT_OPEN));
             let treasury = config.treasury;
             let asset = rolley_token::get_metadata();
-            primary_fungible_store::transfer(staker, treasury, asset, amount);
+            primary_fungible_store::transfer(staker, asset, treasury, amount);
             idx
         };
 
@@ -213,7 +213,7 @@ module rolley_settlement::rolley_settlement {
         assert!(payout > 0, error::invalid_state(ENOTHING_TO_CLAIM));
 
         let asset = rolley_token::get_metadata();
-        primary_fungible_store::transfer(treasury_signer, staker, asset, payout);
+        primary_fungible_store::transfer(treasury_signer, asset, staker, payout);
     }
 
     fun pool_for_side(pick: &Pick, side: u8): u64 {

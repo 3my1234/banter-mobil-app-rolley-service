@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     prediction_start_buffer_minutes: int = 0
     soccer_primary_prefer_safe_markets: bool = True
     soccer_primary_allow_handicap_fallback: bool = True
+    soccer_supported_handicap_lines: str = '1.5'
 
     trusted_soccer_competitions: str = 'eng.1,esp.1,ger.1,ita.1,fra.1,uefa.champions,uefa.europa,uefa.europa.conf,tur.1'
     high_risk_soccer_competitions: str = 'vie.1,tur.2,tur.3'

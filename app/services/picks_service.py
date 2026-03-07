@@ -120,15 +120,10 @@ class PicksService:
 
                 context = await self._gemini.extract_context(match)
                 model_result = self._probability.predict(match, context)
-                decision = self._decision.decide(
+                decision = self._decide_match(
                     sport=sport,
                     probabilities=model_result.probabilities,
                     context=context,
-                )
-                decision = self._apply_soccer_market_guardrail(
-                    sport=sport,
-                    decision=decision,
-                    probabilities=model_result.probabilities,
                     match=match,
                 )
                 league_risk = self._league_risk_profile(
@@ -621,6 +616,216 @@ class PicksService:
     def _safe_odds_from_confidence(self, confidence: float) -> float:
         odds = 1.01 + max(0.0, min(0.08, (confidence - 0.55) * 0.22))
         return round(max(1.01, min(1.09, odds)), 4)
+
+    def _decide_match(
+        self,
+        *,
+        sport: Sport,
+        probabilities,
+        context,
+        match: MatchCandidate,
+    ) -> Decision:
+        if sport != Sport.SOCCER:
+            return self._decision.decide(sport=sport, probabilities=probabilities, context=context)
+        return self._decide_soccer_reasoned(probabilities=probabilities, context=context, match=match)
+
+    def _decide_soccer_reasoned(self, *, probabilities, context, match: MatchCandidate) -> Decision:
+        goal_floor = max(0.0, min(1.0, (match.home_recent5_scored_rate + match.away_recent5_scored_rate) / 2))
+        h2h_balance = 1.0 - min(1.0, abs(match.h2h_home_win_rate - match.h2h_away_win_rate))
+        strength_gap = match.home_recent5_opponent_strength - match.away_recent5_opponent_strength
+        form_gap = match.home_form_index - match.away_form_index
+        goal_diff_gap = (match.home_recent5_goal_diff - match.away_recent5_goal_diff) / 10.0
+        volatility = max(0.0, min(1.0, context.volatility_index / 10.0))
+        urgency = max(0.0, min(1.0, context.urgency_score / 10.0))
+        weather = max(0.0, min(1.0, context.weather_impact / 10.0))
+        injury_gap = max(-1.0, min(1.0, (match.away_injuries - match.home_injuries) / 10.0))
+
+        def clamp(value: float, floor: float = 0.3, ceil: float = 0.99) -> float:
+            return max(floor, min(ceil, value))
+
+        candidates: list[tuple[float, Decision]] = []
+
+        over05_conf = clamp(max(float(probabilities.over_05), goal_floor * 0.92), 0.45)
+        over05_score = over05_conf + goal_floor * 0.10 + h2h_balance * 0.03 - weather * 0.02
+        candidates.append(
+            (
+                over05_score,
+                Decision(
+                    market='TOTAL_GOALS',
+                    selection='Over 0.5',
+                    confidence=round(over05_conf, 4),
+                    implied_odds=self._safe_odds_from_confidence(over05_conf),
+                    rationale=(
+                        'Reasoned market selection favored the goals floor: both teams show scoring activity, '
+                        'and recent H2H balance does not argue for a hard side pick.'
+                    ),
+                ),
+            )
+        )
+
+        over15_conf = clamp(max(float(probabilities.over_15), goal_floor * 0.75), 0.35, 0.95)
+        over15_score = over15_conf + goal_floor * 0.08 + h2h_balance * 0.05 + urgency * 0.02 - volatility * 0.03
+        candidates.append(
+            (
+                over15_score,
+                Decision(
+                    market='TOTAL_GOALS',
+                    selection='Over 1.5',
+                    confidence=round(over15_conf, 4),
+                    implied_odds=self._safe_odds_from_confidence(over15_conf),
+                    rationale=(
+                        'Reasoned market selection favored a wider goals envelope: recency scoring, H2H balance, '
+                        'and urgency signal enough scoring pressure for Over 1.5.'
+                    ),
+                ),
+            )
+        )
+
+        one_x_conf = clamp(
+            float(probabilities.double_chance_1x)
+            + max(0.0, form_gap) * 0.10
+            + max(0.0, goal_diff_gap) * 0.06
+            + max(0.0, strength_gap) * 0.08
+            + max(0.0, injury_gap) * 0.04,
+            0.4,
+        )
+        one_x_score = one_x_conf + max(0.0, form_gap) * 0.10 + max(0.0, strength_gap) * 0.08 - goal_floor * 0.03
+        candidates.append(
+            (
+                one_x_score,
+                Decision(
+                    market='DOUBLE_CHANCE',
+                    selection='1X',
+                    confidence=round(one_x_conf, 4),
+                    implied_odds=self._safe_odds_from_confidence(one_x_conf),
+                    rationale=(
+                        'Reasoned market selection favored 1X: the home side rates better on form, opponent-strength '
+                        'context, and recent goal differential, while draw coverage preserves safety.'
+                    ),
+                ),
+            )
+        )
+
+        x2_conf = clamp(
+            float(probabilities.double_chance_x2)
+            + max(0.0, -form_gap) * 0.10
+            + max(0.0, -goal_diff_gap) * 0.06
+            + max(0.0, -strength_gap) * 0.08
+            + max(0.0, -injury_gap) * 0.04,
+            0.4,
+        )
+        x2_score = x2_conf + max(0.0, -form_gap) * 0.10 + max(0.0, -strength_gap) * 0.08 - goal_floor * 0.03
+        candidates.append(
+            (
+                x2_score,
+                Decision(
+                    market='DOUBLE_CHANCE',
+                    selection='X2',
+                    confidence=round(x2_conf, 4),
+                    implied_odds=self._safe_odds_from_confidence(x2_conf),
+                    rationale=(
+                        'Reasoned market selection favored X2: the away side carries the stronger recent profile or '
+                        'faces the softer opposition context, with draw cover retained for safety.'
+                    ),
+                ),
+            )
+        )
+
+        supported_handicap_lines = self._parse_handicap_lines(self._settings.soccer_supported_handicap_lines)
+        if 1.5 in supported_handicap_lines:
+            home_handicap_conf = clamp(
+                float(probabilities.handicap_home_plus_15) + volatility * 0.04 - max(0.0, -form_gap) * 0.05,
+                0.4,
+            )
+            home_handicap_score = home_handicap_conf + volatility * 0.06 - goal_floor * 0.02
+            candidates.append(
+                (
+                    home_handicap_score,
+                    Decision(
+                        market='HANDICAP',
+                        selection='Home +1.5',
+                        confidence=round(home_handicap_conf, 4),
+                        implied_odds=self._safe_odds_from_confidence(home_handicap_conf),
+                        rationale=(
+                            'Reasoned market selection used Home +1.5: volatility is high enough that side protection '
+                            'is safer than a straight result market.'
+                        ),
+                    ),
+                )
+            )
+
+            away_handicap_conf = clamp(
+                float(probabilities.handicap_away_plus_15) + volatility * 0.04 - max(0.0, form_gap) * 0.05,
+                0.4,
+            )
+            away_handicap_score = away_handicap_conf + volatility * 0.06 - goal_floor * 0.02
+            candidates.append(
+                (
+                    away_handicap_score,
+                    Decision(
+                        market='HANDICAP',
+                        selection='Away +1.5',
+                        confidence=round(away_handicap_conf, 4),
+                        implied_odds=self._safe_odds_from_confidence(away_handicap_conf),
+                        rationale=(
+                            'Reasoned market selection used Away +1.5: volatility and matchup shape favor protected '
+                            'away coverage over a cleaner side market.'
+                        ),
+                    ),
+                )
+            )
+
+        if 2.5 in supported_handicap_lines:
+            home_plus_25_conf = clamp(float(probabilities.handicap_home_plus_15) + 0.05 + volatility * 0.03, 0.45)
+            home_plus_25_score = home_plus_25_conf + volatility * 0.05 - goal_floor * 0.04
+            candidates.append(
+                (
+                    home_plus_25_score,
+                    Decision(
+                        market='HANDICAP',
+                        selection='Home +2.5',
+                        confidence=round(home_plus_25_conf, 4),
+                        implied_odds=self._safe_odds_from_confidence(home_plus_25_conf),
+                        rationale=(
+                            'Reasoned market selection widened the handicap to Home +2.5 because the platform allows '
+                            'it and the volatility profile favors extra protection.'
+                        ),
+                    ),
+                )
+            )
+
+            away_plus_25_conf = clamp(float(probabilities.handicap_away_plus_15) + 0.05 + volatility * 0.03, 0.45)
+            away_plus_25_score = away_plus_25_conf + volatility * 0.05 - goal_floor * 0.04
+            candidates.append(
+                (
+                    away_plus_25_score,
+                    Decision(
+                        market='HANDICAP',
+                        selection='Away +2.5',
+                        confidence=round(away_plus_25_conf, 4),
+                        implied_odds=self._safe_odds_from_confidence(away_plus_25_conf),
+                        rationale=(
+                            'Reasoned market selection widened the handicap to Away +2.5 because the platform allows '
+                            'it and the volatility profile favors extra protection.'
+                        ),
+                    ),
+                )
+            )
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _parse_handicap_lines(self, raw: str) -> set[float]:
+        result: set[float] = set()
+        for item in raw.split(','):
+            token = item.strip()
+            if not token:
+                continue
+            try:
+                result.add(float(token))
+            except Exception:
+                continue
+        return result
 
     def _apply_soccer_market_guardrail(
         self,

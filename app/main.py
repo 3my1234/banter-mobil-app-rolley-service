@@ -139,6 +139,20 @@ async def refresh_picks(
     return await service.refresh_daily_picks(db, target_date=target_date)
 
 
+@app.post(f'{settings.api_prefix}/admin/picks/rebuild', response_model=RefreshResponse)
+async def rebuild_picks(
+    pick_date: date | None = Query(default=None),
+    sport: Sport | None = Query(default=None),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+
+    target_date = pick_date or date.today()
+    return await service.rebuild_daily_picks(db, target_date=target_date, sport=sport)
+
+
 @app.get(f'{settings.api_prefix}/admin/picks')
 def get_admin_picks(
     pick_date: date | None = Query(default=None),

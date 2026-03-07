@@ -79,29 +79,53 @@ class PicksService:
         self._movement = MovementClient()
 
     async def refresh_daily_picks(self, db: Session, *, target_date: date) -> RefreshResponse:
+        return await self._refresh_daily_picks(db, target_date=target_date, sport=None, force_rebuild=False)
+
+    async def rebuild_daily_picks(
+        self,
+        db: Session,
+        *,
+        target_date: date,
+        sport: Sport | None = None,
+    ) -> RefreshResponse:
+        return await self._refresh_daily_picks(db, target_date=target_date, sport=sport, force_rebuild=True)
+
+    async def _refresh_daily_picks(
+        self,
+        db: Session,
+        *,
+        target_date: date,
+        sport: Sport | None,
+        force_rebuild: bool,
+    ) -> RefreshResponse:
         generated = 0
         now_utc = datetime.now(timezone.utc)
-        for sport in [Sport.SOCCER, Sport.BASKETBALL]:
+        sports_to_process = [sport] if sport else [Sport.SOCCER, Sport.BASKETBALL]
+        for current_sport in sports_to_process:
             existing_rows = db.scalars(
                 select(PickRecord)
                 .options(joinedload(PickRecord.settlement))
-                .where(PickRecord.pick_date == target_date, PickRecord.sport == sport.value)
+                .where(PickRecord.pick_date == target_date, PickRecord.sport == current_sport.value)
             ).all()
-            preserved_match_ids = {
-                row.external_match_id for row in existing_rows
-                if self._movement.enabled and row.movement_pick_id is not None
-            }
+            preserved_match_ids = set()
+            if not force_rebuild:
+                preserved_match_ids = {
+                    row.external_match_id for row in existing_rows
+                    if self._movement.enabled and row.movement_pick_id is not None
+                }
 
             matches = self._sports.fetch_matches(
-                sport=sport,
+                sport=current_sport,
                 target_date=datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc),
                 db=db,
             )
 
-            delete_pick_ids = [
-                row.id for row in existing_rows
-                if not (self._movement.enabled and row.movement_pick_id is not None)
-            ]
+            delete_pick_ids = [row.id for row in existing_rows]
+            if not force_rebuild:
+                delete_pick_ids = [
+                    row.id for row in existing_rows
+                    if not (self._movement.enabled and row.movement_pick_id is not None)
+                ]
             if delete_pick_ids:
                 db.execute(delete(PickSettlement).where(PickSettlement.pick_id.in_(delete_pick_ids)))
                 db.execute(delete(PickRecord).where(PickRecord.id.in_(delete_pick_ids)))
@@ -121,13 +145,13 @@ class PicksService:
                 context = await self._gemini.extract_context(match)
                 model_result = self._probability.predict(match, context)
                 decision = self._decide_match(
-                    sport=sport,
+                    sport=current_sport,
                     probabilities=model_result.probabilities,
                     context=context,
                     match=match,
                 )
                 league_risk = self._league_risk_profile(
-                    sport=sport,
+                    sport=current_sport,
                     competition_code=match.competition_code,
                 )
                 total_penalty = min(0.35, match.confidence_penalty + league_risk.penalty)
@@ -159,7 +183,7 @@ class PicksService:
                     id=str(uuid4()),
                     external_match_id=match.external_match_id,
                     pick_date=target_date,
-                    sport=sport.value,
+                    sport=current_sport.value,
                     league=match.league,
                     home_team=match.home_team,
                     away_team=match.away_team,
@@ -175,7 +199,7 @@ class PicksService:
                     StagedPrediction(
                         record=record,
                         data_completeness=match.data_completeness,
-                        sport=sport,
+                        sport=current_sport,
                         competition_code=match.competition_code,
                         risk=league_risk,
                     )

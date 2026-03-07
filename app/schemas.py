@@ -120,6 +120,7 @@ class DailyPicksResponse(BaseModel):
 class PickHistoryResponse(BaseModel):
     sport: Sport | None = None
     before_date: date | None = None
+    pick_date: date | None = None
     picks: list[RolleyPick] = Field(default_factory=list)
 
 

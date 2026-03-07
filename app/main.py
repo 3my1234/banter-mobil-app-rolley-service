@@ -114,13 +114,15 @@ def get_latest_picks(
 def get_pick_history(
     sport: Sport | None = Query(default=None),
     before_date: date | None = Query(default=None),
+    pick_date: date | None = Query(default=None),
     limit: int = Query(default=settings.default_pick_count, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
     return PickHistoryResponse(
         sport=sport,
         before_date=before_date,
-        picks=service.get_history(db, sport=sport, before_date=before_date, limit=limit),
+        pick_date=pick_date,
+        picks=service.get_history(db, sport=sport, before_date=before_date, pick_date=pick_date, limit=limit),
     )
 
 
@@ -154,6 +156,7 @@ def get_admin_picks(
 def get_admin_pick_history(
     sport: Sport | None = Query(default=None),
     before_date: date | None = Query(default=None),
+    pick_date: date | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
@@ -163,7 +166,8 @@ def get_admin_pick_history(
     return PickHistoryResponse(
         sport=sport,
         before_date=before_date,
-        picks=service.get_history(db, sport=sport, before_date=before_date, limit=limit),
+        pick_date=pick_date,
+        picks=service.get_history(db, sport=sport, before_date=before_date, pick_date=pick_date, limit=limit),
     )
 
 

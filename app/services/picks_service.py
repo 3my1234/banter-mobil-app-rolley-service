@@ -241,11 +241,14 @@ class PicksService:
         *,
         sport: Sport | None = None,
         before_date: date | None = None,
+        pick_date: date | None = None,
         limit: int = 20,
     ) -> list[RolleyPick]:
         where = []
         if sport:
             where.append(PickRecord.sport == sport.value)
+        if pick_date:
+            where.append(PickRecord.pick_date == pick_date)
         if before_date:
             where.append(PickRecord.pick_date <= before_date)
 

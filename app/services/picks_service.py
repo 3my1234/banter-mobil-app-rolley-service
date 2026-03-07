@@ -240,6 +240,31 @@ class PicksService:
         ).all()
         return [self._to_pick_view(row) for row in rows]
 
+    def get_history(
+        self,
+        db: Session,
+        *,
+        sport: Sport | None = None,
+        before_date: date | None = None,
+        limit: int = 20,
+    ) -> list[RolleyPick]:
+        where = []
+        if sport:
+            where.append(PickRecord.sport == sport.value)
+        if before_date:
+            where.append(PickRecord.pick_date <= before_date)
+
+        stmt = (
+            select(PickRecord)
+            .options(joinedload(PickRecord.settlement))
+            .order_by(PickRecord.pick_date.desc(), PickRecord.created_at.desc())
+            .limit(limit)
+        )
+        if where:
+            stmt = stmt.where(*where)
+        rows = db.scalars(stmt).all()
+        return [self._to_pick_view(row) for row in rows]
+
     async def settle_pick(self, db: Session, *, pick_id: str, payload: PickSettlementPayload) -> RolleyPick:
         pick = db.scalar(select(PickRecord).where(PickRecord.id == pick_id).options(joinedload(PickRecord.settlement)))
         if not pick:

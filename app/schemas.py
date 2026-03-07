@@ -117,6 +117,12 @@ class DailyPicksResponse(BaseModel):
     picks: list[RolleyPick] = Field(default_factory=list)
 
 
+class PickHistoryResponse(BaseModel):
+    sport: Sport | None = None
+    before_date: date | None = None
+    picks: list[RolleyPick] = Field(default_factory=list)
+
+
 class RefreshResponse(BaseModel):
     success: bool
     date: date

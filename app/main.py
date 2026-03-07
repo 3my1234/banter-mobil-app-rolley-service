@@ -10,6 +10,7 @@ from .config import get_settings
 from .schemas import (
     AutoSettlementResponse,
     PerformanceStatsResponse,
+    PickHistoryResponse,
     PickSettlementPayload,
     RefreshResponse,
     Sport,
@@ -109,6 +110,20 @@ def get_latest_picks(
     return {'picks': service.get_latest(db, limit=limit)}
 
 
+@app.get(f'{settings.api_prefix}/picks/history', response_model=PickHistoryResponse)
+def get_pick_history(
+    sport: Sport | None = Query(default=None),
+    before_date: date | None = Query(default=None),
+    limit: int = Query(default=settings.default_pick_count, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    return PickHistoryResponse(
+        sport=sport,
+        before_date=before_date,
+        picks=service.get_history(db, sport=sport, before_date=before_date, limit=limit),
+    )
+
+
 @app.post(f'{settings.api_prefix}/picks/refresh', response_model=RefreshResponse)
 async def refresh_picks(
     refresh_date: date | None = Query(default=None),
@@ -133,6 +148,23 @@ def get_admin_picks(
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
     target_date = pick_date or date.today()
     return {'date': target_date, 'sport': sport, 'picks': service.list_settlement_candidates(db, target_date=target_date, sport=sport)}
+
+
+@app.get(f'{settings.api_prefix}/admin/picks/history', response_model=PickHistoryResponse)
+def get_admin_pick_history(
+    sport: Sport | None = Query(default=None),
+    before_date: date | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    return PickHistoryResponse(
+        sport=sport,
+        before_date=before_date,
+        picks=service.get_history(db, sport=sport, before_date=before_date, limit=limit),
+    )
 
 
 @app.post(f'{settings.api_prefix}/admin/picks/{{pick_id}}/settle')

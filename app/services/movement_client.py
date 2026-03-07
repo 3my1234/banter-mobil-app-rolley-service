@@ -37,6 +37,16 @@ class MovementSettlementResult:
 
 
 @dataclass(frozen=True)
+class MovementWalletPickStatusResult:
+    movement_pick_id: int
+    wallet_address: str
+    pick_status: str
+    staked_raw: int
+    claimable_raw: int
+    eligible_to_claim: bool
+
+
+@dataclass(frozen=True)
 class MovementSubmissionResult:
     tx_hash: str
     receipt: dict
@@ -45,6 +55,10 @@ class MovementSubmissionResult:
 class MovementClient:
     def __init__(self) -> None:
         self._settings = get_settings()
+        self._read_enabled = bool(
+            self._settings.movement_settlement_module_address
+            and self._settings.movement_node_url
+        )
         self._enabled = bool(
             self._settings.movement_enabled
             and self._settings.movement_private_key
@@ -57,6 +71,10 @@ class MovementClient:
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def read_enabled(self) -> bool:
+        return self._read_enabled
 
     async def ensure_pick(self, pick: PickRecord) -> MovementCreateResult:
         if not self.enabled:
@@ -108,6 +126,44 @@ class MovementClient:
         submission = await self._submit(settle_payload)
         return MovementSettlementResult(tx_hash=submission.tx_hash, status='SETTLED')
 
+    async def get_wallet_pick_statuses(
+        self,
+        *,
+        wallet_address: str,
+        movement_pick_ids: list[int],
+    ) -> list[MovementWalletPickStatusResult]:
+        if not self.read_enabled or not movement_pick_ids:
+            return []
+
+        resource = await self._fetch_settlement_resource()
+        picks = resource.get('picks') or []
+        requested = {int(pick_id) for pick_id in movement_pick_ids if int(pick_id) > 0}
+        wallet_lower = wallet_address.strip().lower()
+        results: list[MovementWalletPickStatusResult] = []
+
+        for pick in picks:
+            pick_id = self._coerce_int(pick.get('pick_id'))
+            if pick_id not in requested:
+                continue
+            staked_raw = 0
+            stakes = pick.get('stakes') or []
+            for stake in stakes:
+                if str(stake.get('staker') or '').strip().lower() == wallet_lower:
+                    staked_raw += self._coerce_int(stake.get('amount'))
+            claimable_raw = self._claimable_from_pick(pick, wallet_lower)
+            results.append(
+                MovementWalletPickStatusResult(
+                    movement_pick_id=pick_id,
+                    wallet_address=wallet_address,
+                    pick_status=self._pick_status_label(self._coerce_int(pick.get('status'))),
+                    staked_raw=staked_raw,
+                    claimable_raw=claimable_raw,
+                    eligible_to_claim=claimable_raw > 0,
+                )
+            )
+
+        return sorted(results, key=lambda item: item.movement_pick_id)
+
     async def _submit(self, payload: EntryFunction) -> MovementSubmissionResult:
         client = self._client()
         account = self._account_instance()
@@ -140,6 +196,58 @@ class MovementClient:
                     return data
                 await asyncio.sleep(0.5)
         raise RuntimeError(f'Movement transaction receipt was not ready for {tx_hash}')
+
+    async def _fetch_settlement_resource(self) -> dict:
+        resource_type = f"{self._settings.movement_settlement_module_address}::rolley_settlement::SettlementConfig"
+        url = (
+            f"{self._settings.movement_node_url.rstrip('/')}"
+            f"/accounts/{self._settings.movement_settlement_module_address}/resource/{resource_type}"
+        )
+        timeout = httpx.Timeout(15.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            return data.get('data') or {}
+
+    def _coerce_int(self, value: object) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _pick_status_label(self, status: int) -> str:
+        if status == 1:
+            return 'OPEN'
+        if status == 2:
+            return 'CLOSED'
+        if status == 3:
+            return 'SETTLED'
+        return 'UNKNOWN'
+
+    def _claimable_from_pick(self, pick: dict, wallet_lower: str) -> int:
+        if self._coerce_int(pick.get('status')) != 3:
+            return 0
+        winning_side = self._coerce_int(pick.get('winning_side'))
+        total_staked = self._coerce_int(pick.get('total_staked'))
+        home_pool = self._coerce_int(pick.get('home_pool'))
+        draw_pool = self._coerce_int(pick.get('draw_pool'))
+        away_pool = self._coerce_int(pick.get('away_pool'))
+        winner_pool = home_pool if winning_side == 1 else draw_pool if winning_side == 2 else away_pool
+        if winner_pool <= 0 or total_staked <= 0:
+            return 0
+
+        claimable = 0
+        for stake in pick.get('stakes') or []:
+            if str(stake.get('staker') or '').strip().lower() != wallet_lower:
+                continue
+            if self._coerce_int(stake.get('side')) != winning_side:
+                continue
+            if bool(stake.get('claimed')):
+                continue
+            amount = self._coerce_int(stake.get('amount'))
+            claimable += (amount * total_staked) // winner_pool
+        return claimable
 
     def _pick_id_from_create_receipt(self, receipt: dict) -> int:
         resource_type = f"{self._settings.movement_settlement_module_address}::rolley_settlement::SettlementConfig"

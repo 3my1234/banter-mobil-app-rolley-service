@@ -125,6 +125,22 @@ class PickHistoryResponse(BaseModel):
     picks: list[RolleyPick] = Field(default_factory=list)
 
 
+class MovementWalletPickStatus(BaseModel):
+    movement_pick_id: int
+    wallet_address: str
+    pick_status: str
+    staked_raw: str
+    staked_rol: float
+    claimable_raw: str
+    claimable_rol: float
+    eligible_to_claim: bool
+
+
+class MovementWalletStatusResponse(BaseModel):
+    wallet_address: str
+    statuses: list[MovementWalletPickStatus] = Field(default_factory=list)
+
+
 class RefreshResponse(BaseModel):
     success: bool
     date: date

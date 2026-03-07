@@ -20,6 +20,8 @@ from ..schemas import (
     AutoSettlementResponse,
     DailyPicksResponse,
     MatchCandidate,
+    MovementWalletPickStatus,
+    MovementWalletStatusResponse,
     PickSettlementPayload,
     PerformanceStatsResponse,
     RefreshResponse,
@@ -286,6 +288,34 @@ class PicksService:
             stmt = stmt.where(*where)
         rows = db.scalars(stmt).all()
         return [self._to_pick_view(row) for row in rows]
+
+    async def get_wallet_movement_statuses(
+        self,
+        *,
+        wallet_address: str,
+        movement_pick_ids: list[int],
+    ) -> MovementWalletStatusResponse:
+        statuses = await self._movement.get_wallet_pick_statuses(
+            wallet_address=wallet_address,
+            movement_pick_ids=movement_pick_ids,
+        )
+        decimals = Decimal(10) ** self._settings.movement_rol_decimals
+        return MovementWalletStatusResponse(
+            wallet_address=wallet_address,
+            statuses=[
+                MovementWalletPickStatus(
+                    movement_pick_id=item.movement_pick_id,
+                    wallet_address=item.wallet_address,
+                    pick_status=item.pick_status,
+                    staked_raw=str(item.staked_raw),
+                    staked_rol=float(Decimal(item.staked_raw) / decimals),
+                    claimable_raw=str(item.claimable_raw),
+                    claimable_rol=float(Decimal(item.claimable_raw) / decimals),
+                    eligible_to_claim=item.eligible_to_claim,
+                )
+                for item in statuses
+            ],
+        )
 
     async def settle_pick(self, db: Session, *, pick_id: str, payload: PickSettlementPayload) -> RolleyPick:
         pick = db.scalar(select(PickRecord).where(PickRecord.id == pick_id).options(joinedload(PickRecord.settlement)))

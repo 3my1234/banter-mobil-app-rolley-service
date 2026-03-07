@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .schemas import (
     AutoSettlementResponse,
+    MovementWalletStatusResponse,
     PerformanceStatsResponse,
     PickHistoryResponse,
     PickSettlementPayload,
@@ -199,6 +200,17 @@ async def settle_pick(
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return {'success': True, 'pick': pick}
+
+
+@app.get(f'{settings.api_prefix}/movement/status', response_model=MovementWalletStatusResponse)
+async def get_movement_wallet_status(
+    wallet_address: str = Query(..., min_length=4),
+    pick_ids: str = Query(..., min_length=1),
+):
+    ids = [int(part) for part in pick_ids.split(',') if part.strip().isdigit()]
+    if not ids:
+        raise HTTPException(status_code=400, detail='No valid pick ids provided')
+    return await service.get_wallet_movement_statuses(wallet_address=wallet_address, movement_pick_ids=ids)
 
 
 @app.post(f'{settings.api_prefix}/admin/picks/auto-settle', response_model=AutoSettlementResponse)

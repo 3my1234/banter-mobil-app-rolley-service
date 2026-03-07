@@ -104,6 +104,7 @@ class RolleyPick(BaseModel):
     movement_sync_status: str | None = None
     settlement_outcome: SettlementOutcome = SettlementOutcome.PENDING
     settlement_notes: str | None = None
+    settled_by: str | None = None
     settled_at: datetime | None = None
     settlement_movement_tx_hash: str | None = None
     created_at: datetime

@@ -1192,6 +1192,7 @@ class PicksService:
             movement_sync_status=row.movement_sync_status,
             settlement_outcome=SettlementOutcome(outcome),
             settlement_notes=settlement.notes if settlement else None,
+            settled_by=settlement.settled_by if settlement else None,
             settled_at=settlement.settled_at if settlement else None,
             settlement_movement_tx_hash=settlement.movement_tx_hash if settlement else None,
             created_at=row.created_at,

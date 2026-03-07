@@ -112,6 +112,12 @@ class PicksService:
                 .options(joinedload(PickRecord.settlement))
                 .where(PickRecord.pick_date == target_date, PickRecord.sport == current_sport.value)
             ).all()
+            existing_product = db.scalar(
+                select(DailyProduct).where(
+                    DailyProduct.product_date == target_date,
+                    DailyProduct.sport == current_sport.value,
+                )
+            )
             preserved_match_ids = set()
             if not force_rebuild:
                 preserved_match_ids = {
@@ -131,7 +137,25 @@ class PicksService:
                     row.id for row in existing_rows
                     if not (self._movement.enabled and row.movement_pick_id is not None)
                 ]
+            if force_rebuild:
+                if existing_product:
+                    db.execute(
+                        delete(StakeDailyResult).where(
+                            (StakeDailyResult.daily_product_id == existing_product.id)
+                            | (StakeDailyResult.pick_date == target_date)
+                        )
+                    )
+                    db.execute(delete(DailyProductLeg).where(DailyProductLeg.daily_product_id == existing_product.id))
+                    db.execute(delete(DailyProduct).where(DailyProduct.id == existing_product.id))
+                elif target_date <= date.today():
+                    db.execute(
+                        delete(StakeDailyResult).where(
+                            StakeDailyResult.pick_date == target_date,
+                        )
+                    )
             if delete_pick_ids:
+                db.execute(delete(DailyProductLeg).where(DailyProductLeg.pick_id.in_(delete_pick_ids)))
+                db.execute(delete(StakeDailyResult).where(StakeDailyResult.pick_id.in_(delete_pick_ids)))
                 db.execute(delete(PickSettlement).where(PickSettlement.pick_id.in_(delete_pick_ids)))
                 db.execute(delete(PickRecord).where(PickRecord.id.in_(delete_pick_ids)))
             db.flush()

@@ -125,6 +125,38 @@ class PickHistoryResponse(BaseModel):
     picks: list[RolleyPick] = Field(default_factory=list)
 
 
+class DailyProductLegView(BaseModel):
+    pick_id: str
+    leg_index: int
+    is_primary: bool = False
+    market: str
+    selection: str
+    confidence: float
+    implied_odds: float
+
+
+class DailyProductView(BaseModel):
+    id: str
+    product_date: date
+    sport: Sport
+    kind: str
+    combined_confidence: float
+    combined_odds: float
+    settled_factor: float | None = None
+    status: str
+    outcome: SettlementOutcome = SettlementOutcome.PENDING
+    rationale: str
+    settled_at: datetime | None = None
+    created_at: datetime
+    legs: list[DailyProductLegView] = Field(default_factory=list)
+
+
+class DailyProductsResponse(BaseModel):
+    date: date
+    sport: Sport
+    products: list[DailyProductView] = Field(default_factory=list)
+
+
 class MovementWalletPickStatus(BaseModel):
     movement_pick_id: int
     wallet_address: str

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .schemas import (
     AutoSettlementResponse,
+    DailyProductsResponse,
     MovementWalletStatusResponse,
     PerformanceStatsResponse,
     PickHistoryResponse,
@@ -125,6 +126,16 @@ def get_pick_history(
         pick_date=pick_date,
         picks=service.get_history(db, sport=sport, before_date=before_date, pick_date=pick_date, limit=limit),
     )
+
+
+@app.get(f'{settings.api_prefix}/products/daily', response_model=DailyProductsResponse)
+def get_daily_products(
+    sport: Sport = Query(...),
+    pick_date: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    target_date = pick_date or date.today()
+    return service.get_daily_products(db, target_date=target_date, sport=sport)
 
 
 @app.post(f'{settings.api_prefix}/picks/refresh', response_model=RefreshResponse)

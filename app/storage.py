@@ -23,12 +23,18 @@ def _run_lightweight_migrations() -> None:
     with engine.begin() as connection:
         if 'rolley_picks' in inspector.get_table_names():
             columns = {column['name'] for column in inspector.get_columns('rolley_picks')}
+            if 'daily_product_id' not in columns:
+                connection.execute(text('ALTER TABLE rolley_picks ADD COLUMN daily_product_id VARCHAR(36)'))
             if 'movement_pick_id' not in columns:
                 connection.execute(text('ALTER TABLE rolley_picks ADD COLUMN movement_pick_id INTEGER'))
             if 'movement_tx_hash' not in columns:
                 connection.execute(text('ALTER TABLE rolley_picks ADD COLUMN movement_tx_hash VARCHAR(120)'))
             if 'movement_sync_status' not in columns:
                 connection.execute(text('ALTER TABLE rolley_picks ADD COLUMN movement_sync_status VARCHAR(24)'))
+        if 'rolley_stake_daily_results' in inspector.get_table_names():
+            columns = {column['name'] for column in inspector.get_columns('rolley_stake_daily_results')}
+            if 'daily_product_id' not in columns:
+                connection.execute(text('ALTER TABLE rolley_stake_daily_results ADD COLUMN daily_product_id VARCHAR(36)'))
         if 'rolley_pick_settlements' in inspector.get_table_names():
             columns = {column['name'] for column in inspector.get_columns('rolley_pick_settlements')}
             if 'movement_tx_hash' not in columns:

@@ -11,13 +11,16 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, joinedload
 
 from ..config import get_settings
-from ..models import MatchHistory, PickRecord, PickSettlement, StakeDailyResult, StakePosition
+from ..models import DailyProduct, DailyProductLeg, MatchHistory, PickRecord, PickSettlement, StakeDailyResult, StakePosition
 from ..providers.gemini_client import GeminiContextClient
 from ..providers.sports_provider import SportsDataProvider
 from ..reasoning import Decision, ProbabilityEngine, RolleyDecisionEngine
 from .movement_client import MovementClient
 from ..schemas import (
     AutoSettlementResponse,
+    DailyProductLegView,
+    DailyProductsResponse,
+    DailyProductView,
     DailyPicksResponse,
     MatchCandidate,
     MovementWalletPickStatus,
@@ -227,6 +230,9 @@ class PicksService:
 
             db.commit()
 
+            self._upsert_daily_product(db, target_date=target_date, sport=current_sport)
+            db.commit()
+
             if staged and self._movement.enabled:
                 for item in staged:
                     await self._sync_pick_to_movement(db, pick_id=item.record.id)
@@ -289,6 +295,19 @@ class PicksService:
         rows = db.scalars(stmt).all()
         return [self._to_pick_view(row) for row in rows]
 
+    def get_daily_products(self, db: Session, *, target_date: date, sport: Sport) -> DailyProductsResponse:
+        rows = db.scalars(
+            select(DailyProduct)
+            .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick))
+            .where(DailyProduct.product_date == target_date, DailyProduct.sport == sport.value)
+            .order_by(DailyProduct.created_at.desc())
+        ).all()
+        return DailyProductsResponse(
+            date=target_date,
+            sport=sport,
+            products=[self._to_daily_product_view(row) for row in rows],
+        )
+
     async def get_wallet_movement_statuses(
         self,
         *,
@@ -334,8 +353,10 @@ class PicksService:
         db.add(settlement)
         db.flush()
 
-        if pick.is_primary and payload.outcome != SettlementOutcome.PENDING:
-            self._apply_settlement_to_stakes(db, pick=pick, outcome=payload.outcome)
+        if payload.outcome != SettlementOutcome.PENDING:
+            daily_product = self._refresh_daily_product_from_pick(db, pick=pick)
+            if daily_product and daily_product.outcome != SettlementOutcome.PENDING.value:
+                self._apply_daily_product_to_stakes(db, daily_product=daily_product)
 
         db.commit()
 
@@ -443,8 +464,10 @@ class PicksService:
             else:
                 void_count += 1
 
-            if pick.is_primary and outcome != SettlementOutcome.PENDING:
-                self._apply_settlement_to_stakes(db, pick=pick, outcome=outcome)
+            if outcome != SettlementOutcome.PENDING:
+                daily_product = self._refresh_daily_product_from_pick(db, pick=pick)
+                if daily_product and daily_product.outcome != SettlementOutcome.PENDING.value:
+                    self._apply_daily_product_to_stakes(db, daily_product=daily_product)
 
         db.commit()
 
@@ -584,54 +607,56 @@ class PicksService:
         return StakeWithdrawResponse(success=True, stake=self._to_stake_view(position))
 
     def _apply_settlement_to_stakes(self, db: Session, *, pick: PickRecord, outcome: SettlementOutcome) -> None:
+        daily_product = self._refresh_daily_product_from_pick(db, pick=pick)
+        if daily_product and daily_product.outcome != SettlementOutcome.PENDING.value:
+            self._apply_daily_product_to_stakes(db, daily_product=daily_product)
+
+    def _apply_daily_product_to_stakes(self, db: Session, *, daily_product: DailyProduct) -> None:
+        product_outcome = SettlementOutcome(daily_product.outcome)
         positions = db.scalars(
             select(StakePosition).where(
                 StakePosition.status == StakeStatus.ACTIVE.value,
-                StakePosition.sport == pick.sport,
-                StakePosition.starts_on <= pick.pick_date,
-                StakePosition.ends_on >= pick.pick_date,
+                StakePosition.sport == daily_product.sport,
+                StakePosition.starts_on <= daily_product.product_date,
+                StakePosition.ends_on >= daily_product.product_date,
             )
         ).all()
+
+        reference_pick_id = self._reference_pick_id_for_product(daily_product)
+        factor = self._daily_product_factor(daily_product)
 
         for position in positions:
             exists = db.scalar(
                 select(StakeDailyResult).where(
                     StakeDailyResult.stake_id == position.id,
-                    StakeDailyResult.pick_date == pick.pick_date,
+                    StakeDailyResult.pick_date == daily_product.product_date,
                 )
             )
             if exists:
                 continue
 
             starting = Decimal(position.current_raw)
-            factor = Decimal('1')
-            if outcome == SettlementOutcome.WIN:
-                factor = Decimal(str(pick.implied_odds))
-            elif outcome == SettlementOutcome.LOSS:
-                factor = Decimal('0')
-            elif outcome == SettlementOutcome.VOID:
-                factor = Decimal('1')
-
             ending = (starting * factor).quantize(Decimal('1'), rounding=ROUND_FLOOR)
             position.current_raw = str(max(ending, Decimal('0')))
             position.total_factor = float(Decimal(str(position.total_factor)) * factor)
 
-            if outcome == SettlementOutcome.LOSS:
+            if product_outcome == SettlementOutcome.LOSS:
                 position.status = StakeStatus.LOST.value
                 position.matured_at = datetime.utcnow()
                 position.gross_profit_raw = '0'
                 position.platform_fee_raw = '0'
                 position.net_payout_raw = '0'
-            elif pick.pick_date >= position.ends_on:
+            elif daily_product.product_date >= position.ends_on:
                 self._mature_position(position)
 
             db.add(
                 StakeDailyResult(
                     id=str(uuid4()),
                     stake_id=position.id,
-                    pick_id=pick.id,
-                    pick_date=pick.pick_date,
-                    outcome=outcome.value,
+                    daily_product_id=daily_product.id,
+                    pick_id=reference_pick_id,
+                    pick_date=daily_product.product_date,
+                    outcome=product_outcome.value,
                     factor=float(factor),
                     starting_raw=str(starting),
                     ending_raw=position.current_raw,
@@ -1179,6 +1204,161 @@ class PicksService:
 
         return SettlementOutcome.VOID
 
+    def _upsert_daily_product(self, db: Session, *, target_date: date, sport: Sport) -> DailyProduct | None:
+        picks = db.scalars(
+            select(PickRecord)
+            .options(joinedload(PickRecord.settlement))
+            .where(PickRecord.pick_date == target_date, PickRecord.sport == sport.value)
+            .order_by(PickRecord.is_primary.desc(), PickRecord.confidence.desc(), PickRecord.created_at.asc())
+        ).all()
+
+        existing = db.scalar(
+            select(DailyProduct)
+            .options(joinedload(DailyProduct.legs))
+            .where(DailyProduct.product_date == target_date, DailyProduct.sport == sport.value)
+        )
+
+        if not picks:
+            if existing:
+                db.execute(delete(DailyProductLeg).where(DailyProductLeg.daily_product_id == existing.id))
+                db.delete(existing)
+                db.flush()
+            return None
+
+        if existing is None:
+            existing = DailyProduct(id=str(uuid4()), product_date=target_date, sport=sport.value)
+            db.add(existing)
+            db.flush()
+
+        db.execute(delete(DailyProductLeg).where(DailyProductLeg.daily_product_id == existing.id))
+        db.flush()
+
+        combined_odds = Decimal('1')
+        total_confidence = Decimal('0')
+        rationale_bits: list[str] = []
+        for index, pick in enumerate(picks):
+            pick.daily_product_id = existing.id
+            db.add(pick)
+            db.add(
+                DailyProductLeg(
+                    id=str(uuid4()),
+                    daily_product_id=existing.id,
+                    pick_id=pick.id,
+                    leg_index=index,
+                    is_primary=bool(pick.is_primary),
+                    confidence=pick.confidence,
+                    implied_odds=pick.implied_odds,
+                )
+            )
+            combined_odds *= Decimal(str(max(1.0, pick.implied_odds)))
+            total_confidence += Decimal(str(max(0.0, pick.confidence)))
+            rationale_bits.append(f'{pick.market} {pick.selection}')
+
+        existing.kind = 'SINGLE' if len(picks) == 1 else 'BASKET'
+        existing.combined_confidence = float((total_confidence / Decimal(len(picks))).quantize(Decimal('0.0001')))
+        existing.combined_odds = float(combined_odds.quantize(Decimal('0.0001')))
+        existing.settled_factor = None
+        existing.status = 'OPEN'
+        existing.outcome = SettlementOutcome.PENDING.value
+        existing.settled_at = None
+        existing.rationale = (
+            f'Reasoned daily {existing.kind.lower()} built from {len(picks)} leg(s): '
+            + '; '.join(rationale_bits)
+        )
+        db.add(existing)
+        db.flush()
+        db.refresh(existing)
+        return existing
+
+    def _refresh_daily_product_from_pick(self, db: Session, *, pick: PickRecord) -> DailyProduct | None:
+        if not pick.daily_product_id:
+            self._upsert_daily_product(db, target_date=pick.pick_date, sport=Sport(pick.sport))
+            db.flush()
+            db.refresh(pick)
+        if not pick.daily_product_id:
+            return None
+
+        daily_product = db.scalar(
+            select(DailyProduct)
+            .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick).joinedload(PickRecord.settlement))
+            .where(DailyProduct.id == pick.daily_product_id)
+        )
+        if not daily_product or not daily_product.legs:
+            return None
+
+        outcomes: list[SettlementOutcome] = []
+        for leg in daily_product.legs:
+            if not leg.pick or not leg.pick.settlement:
+                daily_product.status = 'OPEN'
+                daily_product.outcome = SettlementOutcome.PENDING.value
+                daily_product.settled_factor = None
+                daily_product.settled_at = None
+                db.add(daily_product)
+                db.flush()
+                return daily_product
+            outcomes.append(SettlementOutcome(leg.pick.settlement.outcome))
+
+        if any(item == SettlementOutcome.PENDING for item in outcomes):
+            daily_product.status = 'OPEN'
+            daily_product.outcome = SettlementOutcome.PENDING.value
+            daily_product.settled_factor = None
+            daily_product.settled_at = None
+            db.add(daily_product)
+            db.flush()
+            return daily_product
+
+        if any(item == SettlementOutcome.LOSS for item in outcomes):
+            product_outcome = SettlementOutcome.LOSS
+        elif any(item == SettlementOutcome.WIN for item in outcomes):
+            product_outcome = SettlementOutcome.WIN
+        else:
+            product_outcome = SettlementOutcome.VOID
+
+        settled_factor = self._compute_daily_product_factor_from_legs(daily_product)
+        daily_product.status = 'SETTLED'
+        daily_product.outcome = product_outcome.value
+        daily_product.settled_factor = float(settled_factor)
+        daily_product.settled_at = max(
+            (
+                leg.pick.settlement.settled_at
+                for leg in daily_product.legs
+                if leg.pick and leg.pick.settlement and leg.pick.settlement.settled_at
+            ),
+            default=datetime.utcnow(),
+        )
+        db.add(daily_product)
+        db.flush()
+        return daily_product
+
+    def _compute_daily_product_factor_from_legs(self, daily_product: DailyProduct) -> Decimal:
+        if daily_product.outcome == SettlementOutcome.LOSS.value:
+            return Decimal('0')
+        factor = Decimal('1')
+        for leg in daily_product.legs:
+            if not leg.pick or not leg.pick.settlement:
+                continue
+            leg_outcome = SettlementOutcome(leg.pick.settlement.outcome)
+            if leg_outcome == SettlementOutcome.WIN:
+                factor *= Decimal(str(leg.implied_odds))
+            elif leg_outcome == SettlementOutcome.LOSS:
+                return Decimal('0')
+        return factor.quantize(Decimal('0.0001'))
+
+    def _daily_product_factor(self, daily_product: DailyProduct) -> Decimal:
+        if daily_product.outcome == SettlementOutcome.LOSS.value:
+            return Decimal('0')
+        if daily_product.outcome == SettlementOutcome.VOID.value:
+            return Decimal('1')
+        if daily_product.settled_factor is not None and daily_product.settled_factor > 0:
+            return Decimal(str(daily_product.settled_factor))
+        return Decimal(str(max(1.0, daily_product.combined_odds)))
+
+    def _reference_pick_id_for_product(self, daily_product: DailyProduct) -> str:
+        primary_leg = next((leg for leg in daily_product.legs if leg.is_primary), None)
+        if primary_leg:
+            return primary_leg.pick_id
+        return daily_product.legs[0].pick_id
+
     def _extract_threshold(self, *, selection: str, token: str) -> float | None:
         pattern = rf'{token}\s+([0-9]+(?:\.[0-9]+)?)'
         match = re.search(pattern, selection)
@@ -1226,6 +1406,34 @@ class PicksService:
             settled_at=settlement.settled_at if settlement else None,
             settlement_movement_tx_hash=settlement.movement_tx_hash if settlement else None,
             created_at=row.created_at,
+        )
+
+    def _to_daily_product_view(self, row: DailyProduct) -> DailyProductView:
+        return DailyProductView(
+            id=row.id,
+            product_date=row.product_date,
+            sport=Sport(row.sport),
+            kind=row.kind,
+            combined_confidence=row.combined_confidence,
+            combined_odds=row.combined_odds,
+            settled_factor=row.settled_factor,
+            status=row.status,
+            outcome=SettlementOutcome(row.outcome),
+            rationale=row.rationale,
+            settled_at=row.settled_at,
+            created_at=row.created_at,
+            legs=[
+                DailyProductLegView(
+                    pick_id=leg.pick_id,
+                    leg_index=leg.leg_index,
+                    is_primary=leg.is_primary,
+                    market=leg.pick.market if leg.pick else '',
+                    selection=leg.pick.selection if leg.pick else '',
+                    confidence=leg.confidence,
+                    implied_odds=leg.implied_odds,
+                )
+                for leg in row.legs
+            ],
         )
 
     async def _sync_pick_to_movement(self, db: Session, *, pick_id: str) -> None:

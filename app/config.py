@@ -74,7 +74,9 @@ class Settings(BaseSettings):
     )
 
     movement_enabled: bool = False
+    movement_network: str = 'testnet'
     movement_node_url: str = 'https://testnet.movementnetwork.xyz/v1'
+    movement_explorer_base: str = 'https://explorer.movementnetwork.xyz'
     movement_private_key: str | None = None
     movement_account_address: str | None = None
     movement_token_module_address: str | None = None

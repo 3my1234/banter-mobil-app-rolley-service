@@ -652,9 +652,11 @@ class PicksService:
         context,
         match: MatchCandidate,
     ) -> Decision:
-        if sport != Sport.SOCCER:
-            return self._decision.decide(sport=sport, probabilities=probabilities, context=context)
-        return self._decide_soccer_reasoned(probabilities=probabilities, context=context, match=match)
+        if sport == Sport.SOCCER:
+            return self._decide_soccer_reasoned(probabilities=probabilities, context=context, match=match)
+        if sport == Sport.BASKETBALL:
+            return self._decide_basketball_reasoned(probabilities=probabilities, context=context, match=match)
+        return self._decision.decide(sport=sport, probabilities=probabilities, context=context)
 
     def _decide_soccer_reasoned(self, *, probabilities, context, match: MatchCandidate) -> Decision:
         goal_floor = max(0.0, min(1.0, (match.home_recent5_scored_rate + match.away_recent5_scored_rate) / 2))
@@ -838,6 +840,106 @@ class PicksService:
                     ),
                 )
             )
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def _decide_basketball_reasoned(self, *, probabilities, context, match: MatchCandidate) -> Decision:
+        offense_floor = max(0.0, min(1.0, (match.home_recent5_scored_rate + match.away_recent5_scored_rate) / 2))
+        h2h_balance = 1.0 - min(1.0, abs(match.h2h_home_win_rate - match.h2h_away_win_rate))
+        strength_gap = match.home_recent5_opponent_strength - match.away_recent5_opponent_strength
+        form_gap = match.home_form_index - match.away_form_index
+        margin_gap = (match.home_recent5_goal_diff - match.away_recent5_goal_diff) / 10.0
+        volatility = max(0.0, min(1.0, context.volatility_index / 10.0))
+        urgency = max(0.0, min(1.0, context.urgency_score / 10.0))
+        fatigue_gap = max(-1.0, min(1.0, context.fatigue_level / 10.0))
+        injury_gap = max(-1.0, min(1.0, (match.away_injuries - match.home_injuries) / 10.0))
+
+        def clamp(value: float, floor: float = 0.35, ceil: float = 0.99) -> float:
+            return max(floor, min(ceil, value))
+
+        def score_for_side(side_bias: float, cover_bonus: float, line_penalty: float) -> float:
+            return side_bias + cover_bonus + urgency * 0.03 + offense_floor * 0.02 + h2h_balance * 0.02 - line_penalty
+
+        candidates: list[tuple[float, Decision]] = []
+
+        home_side_bias = max(0.0, form_gap) * 0.12 + max(0.0, margin_gap) * 0.10 + max(0.0, strength_gap) * 0.08 + max(0.0, injury_gap) * 0.05
+        away_side_bias = max(0.0, -form_gap) * 0.12 + max(0.0, -margin_gap) * 0.10 + max(0.0, -strength_gap) * 0.08 + max(0.0, -injury_gap) * 0.05
+        volatility_cover_bonus = volatility * 0.08 + max(0.0, fatigue_gap) * 0.02
+
+        home_plus_85_conf = clamp(
+            float(probabilities.basketball_home_plus_85) + home_side_bias * 0.55 + urgency * 0.02 - volatility * 0.02,
+            0.45,
+        )
+        candidates.append(
+            (
+                score_for_side(home_side_bias, volatility_cover_bonus * 0.4, 0.02),
+                Decision(
+                    market='ALT_SPREAD',
+                    selection='Home +8.5',
+                    confidence=round(home_plus_85_conf, 4),
+                    implied_odds=self._safe_odds_from_confidence(home_plus_85_conf),
+                    rationale=(
+                        'Reasoned market selection favored Home +8.5: home form, recent scoring margin, and opponent-strength '
+                        'context support the home side while the cushion protects against late-game swings.'
+                    ),
+                ),
+            )
+        )
+
+        away_plus_85_conf = clamp(
+            float(probabilities.basketball_away_plus_85) + away_side_bias * 0.55 + urgency * 0.02 - volatility * 0.02,
+            0.45,
+        )
+        candidates.append(
+            (
+                score_for_side(away_side_bias, volatility_cover_bonus * 0.4, 0.02),
+                Decision(
+                    market='ALT_SPREAD',
+                    selection='Away +8.5',
+                    confidence=round(away_plus_85_conf, 4),
+                    implied_odds=self._safe_odds_from_confidence(away_plus_85_conf),
+                    rationale=(
+                        'Reasoned market selection favored Away +8.5: the away profile compares better on form, recent margin, '
+                        'or opponent-quality context, and the spread keeps the bet inside a safer range.'
+                    ),
+                ),
+            )
+        )
+
+        home_plus_105_conf = clamp(home_plus_85_conf + 0.04 + volatility * 0.04, 0.5)
+        candidates.append(
+            (
+                score_for_side(home_side_bias, volatility_cover_bonus, 0.0),
+                Decision(
+                    market='ALT_SPREAD',
+                    selection='Home +10.5',
+                    confidence=round(home_plus_105_conf, 4),
+                    implied_odds=self._safe_odds_from_confidence(home_plus_105_conf),
+                    rationale=(
+                        'Reasoned market selection widened to Home +10.5 because volatility and fatigue risk make extra protection '
+                        'more defensible than a tighter spread.'
+                    ),
+                ),
+            )
+        )
+
+        away_plus_105_conf = clamp(away_plus_85_conf + 0.04 + volatility * 0.04, 0.5)
+        candidates.append(
+            (
+                score_for_side(away_side_bias, volatility_cover_bonus, 0.0),
+                Decision(
+                    market='ALT_SPREAD',
+                    selection='Away +10.5',
+                    confidence=round(away_plus_105_conf, 4),
+                    implied_odds=self._safe_odds_from_confidence(away_plus_105_conf),
+                    rationale=(
+                        'Reasoned market selection widened to Away +10.5 because matchup volatility and rotation uncertainty favor '
+                        'additional away-side cover over a tighter line.'
+                    ),
+                ),
+            )
+        )
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]

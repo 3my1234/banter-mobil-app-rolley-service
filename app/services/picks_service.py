@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal, ROUND_FLOOR
+from itertools import combinations
 from uuid import uuid4
 
 from sqlalchemy import delete, select
@@ -1254,6 +1255,10 @@ class PicksService:
                 db.flush()
             return None
 
+        product_picks = self._select_daily_product_picks(picks=picks, sport=sport)
+        if not product_picks:
+            product_picks = picks[:1]
+
         if existing is None:
             existing = DailyProduct(id=str(uuid4()), product_date=target_date, sport=sport.value)
             db.add(existing)
@@ -1265,7 +1270,8 @@ class PicksService:
         combined_odds = Decimal('1')
         total_confidence = Decimal('0')
         rationale_bits: list[str] = []
-        for index, pick in enumerate(picks):
+        selected_ids = {pick.id for pick in product_picks}
+        for index, pick in enumerate(product_picks):
             pick.daily_product_id = existing.id
             db.add(pick)
             db.add(
@@ -1283,21 +1289,135 @@ class PicksService:
             total_confidence += Decimal(str(max(0.0, pick.confidence)))
             rationale_bits.append(f'{pick.market} {pick.selection}')
 
-        existing.kind = 'SINGLE' if len(picks) == 1 else 'BASKET'
-        existing.combined_confidence = float((total_confidence / Decimal(len(picks))).quantize(Decimal('0.0001')))
+        for pick in picks:
+            if pick.id not in selected_ids and pick.daily_product_id == existing.id:
+                pick.daily_product_id = None
+                db.add(pick)
+
+        existing.kind = 'SINGLE' if len(product_picks) == 1 else 'BASKET'
+        existing.combined_confidence = float((total_confidence / Decimal(len(product_picks))).quantize(Decimal('0.0001')))
         existing.combined_odds = float(combined_odds.quantize(Decimal('0.0001')))
         existing.settled_factor = None
         existing.status = 'OPEN'
         existing.outcome = SettlementOutcome.PENDING.value
         existing.settled_at = None
         existing.rationale = (
-            f'Reasoned daily {existing.kind.lower()} built from {len(picks)} leg(s): '
+            f'Reasoned daily {existing.kind.lower()} built from {len(product_picks)} leg(s): '
             + '; '.join(rationale_bits)
         )
         db.add(existing)
         db.flush()
         db.refresh(existing)
         return existing
+
+    def _select_daily_product_picks(self, *, picks: list[PickRecord], sport: Sport) -> list[PickRecord]:
+        if not picks:
+            return []
+
+        min_legs = max(1, int(self._settings.daily_product_min_legs))
+        max_legs = max(min_legs, int(self._settings.daily_product_max_legs))
+        max_legs = min(max_legs, len(picks))
+
+        ordered = sorted(
+            picks,
+            key=lambda item: (bool(item.is_primary), item.confidence, item.implied_odds, item.created_at),
+            reverse=True,
+        )
+
+        best_rank: tuple[float, float] | None = None
+        best_picks: list[PickRecord] | None = None
+        for size in range(min_legs, max_legs + 1):
+            for combo in combinations(ordered, size):
+                combo_list = list(combo)
+                if not self._daily_product_combo_is_valid(combo_list, sport=sport):
+                    continue
+                score = self._score_daily_product_combo(combo_list, sport=sport)
+                rank = (score[0], -float(size))
+                if best_rank is None or rank > best_rank:
+                    best_rank = rank
+                    best_picks = combo_list
+
+        if best_picks:
+            return best_picks
+        return ordered[:1]
+
+    def _daily_product_combo_is_valid(self, picks: list[PickRecord], *, sport: Sport) -> bool:
+        if not picks:
+            return False
+
+        unique_matches = {pick.external_match_id for pick in picks}
+        if len(unique_matches) != len(picks):
+            return False
+
+        if sport == Sport.SOCCER:
+            double_chance_count = sum(1 for pick in picks if pick.market.upper() == 'DOUBLE_CHANCE')
+            if double_chance_count > int(self._settings.soccer_daily_product_max_double_chance_legs):
+                return False
+
+            market_counts: dict[str, int] = {}
+            for pick in picks:
+                market = pick.market.upper()
+                market_counts[market] = market_counts.get(market, 0) + 1
+            if any(count > int(self._settings.soccer_daily_product_max_same_market_legs) for count in market_counts.values()):
+                return False
+
+        if sport == Sport.BASKETBALL and self._settings.basketball_daily_product_prefer_mixed_sides and len(picks) > 1:
+            sides = {self._basketball_selection_side(pick.selection) for pick in picks}
+            sides.discard('UNKNOWN')
+            if len(sides) == 1:
+                return False
+
+        return True
+
+    def _score_daily_product_combo(self, picks: list[PickRecord], *, sport: Sport) -> tuple[float, float]:
+        combined_odds = 1.0
+        confidence_sum = 0.0
+        market_counts: dict[str, int] = {}
+        for pick in picks:
+            combined_odds *= max(1.0, float(pick.implied_odds))
+            confidence_sum += max(0.0, float(pick.confidence))
+            market = pick.market.upper()
+            market_counts[market] = market_counts.get(market, 0) + 1
+
+        avg_confidence = confidence_sum / len(picks)
+        target_min = float(self._settings.daily_product_target_multiplier_min)
+        target_max = float(self._settings.daily_product_target_multiplier_max)
+
+        if target_min <= combined_odds <= target_max:
+            odds_score = 1.0
+        elif combined_odds < target_min:
+            odds_score = max(0.0, 1.0 - (target_min - combined_odds) * 8.0)
+        else:
+            odds_score = max(0.0, 1.0 - (combined_odds - target_max) * 6.0)
+
+        diversity_penalty = sum(max(0, count - 1) for count in market_counts.values()) * 0.08
+        primary_bonus = 0.04 if any(pick.is_primary for pick in picks) else 0.0
+
+        if sport == Sport.SOCCER:
+            safe_bonus = sum(
+                0.03
+                for pick in picks
+                if (pick.market.upper(), pick.selection.upper()) in {
+                    ('TOTAL_GOALS', 'OVER 0.5'),
+                    ('TOTAL_GOALS', 'OVER 1.5'),
+                    ('DOUBLE_CHANCE', '1X'),
+                    ('DOUBLE_CHANCE', 'X2'),
+                }
+            )
+        else:
+            mixed_side_bonus = 0.03 if len({self._basketball_selection_side(pick.selection) for pick in picks}) > 1 else 0.0
+            safe_bonus = mixed_side_bonus
+
+        score = (avg_confidence * 0.7) + (odds_score * 0.3) + safe_bonus + primary_bonus - diversity_penalty
+        return score, combined_odds
+
+    def _basketball_selection_side(self, selection: str) -> str:
+        upper = (selection or '').upper()
+        if upper.startswith('HOME '):
+            return 'HOME'
+        if upper.startswith('AWAY '):
+            return 'AWAY'
+        return 'UNKNOWN'
 
     def _refresh_daily_product_from_pick(self, db: Session, *, pick: PickRecord) -> DailyProduct | None:
         if not pick.daily_product_id:

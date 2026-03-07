@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     soccer_primary_prefer_safe_markets: bool = True
     soccer_primary_allow_handicap_fallback: bool = True
     soccer_supported_handicap_lines: str = '1.5'
+    daily_product_min_legs: int = 1
+    daily_product_max_legs: int = 3
+    daily_product_target_multiplier_min: float = 1.10
+    daily_product_target_multiplier_max: float = 1.20
+    soccer_daily_product_max_double_chance_legs: int = 1
+    soccer_daily_product_max_same_market_legs: int = 2
+    basketball_daily_product_prefer_mixed_sides: bool = True
 
     trusted_soccer_competitions: str = 'eng.1,esp.1,ger.1,ita.1,fra.1,uefa.champions,uefa.europa,uefa.europa.conf,tur.1'
     high_risk_soccer_competitions: str = 'vie.1,tur.2,tur.3'

@@ -320,12 +320,17 @@ class PicksService:
         return [self._to_pick_view(row) for row in rows]
 
     def get_daily_products(self, db: Session, *, target_date: date, sport: Sport) -> DailyProductsResponse:
-        rows = db.scalars(
-            select(DailyProduct)
-            .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick))
-            .where(DailyProduct.product_date == target_date, DailyProduct.sport == sport.value)
-            .order_by(DailyProduct.created_at.desc())
-        ).all()
+        rows = (
+            db.execute(
+                select(DailyProduct)
+                .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick))
+                .where(DailyProduct.product_date == target_date, DailyProduct.sport == sport.value)
+                .order_by(DailyProduct.created_at.desc())
+            )
+            .unique()
+            .scalars()
+            .all()
+        )
         return DailyProductsResponse(
             date=target_date,
             sport=sport,

@@ -1361,12 +1361,6 @@ class PicksService:
             if any(count > int(self._settings.soccer_daily_product_max_same_market_legs) for count in market_counts.values()):
                 return False
 
-        if sport == Sport.BASKETBALL and self._settings.basketball_daily_product_prefer_mixed_sides and len(picks) > 1:
-            sides = {self._basketball_selection_side(pick.selection) for pick in picks}
-            sides.discard('UNKNOWN')
-            if len(sides) == 1:
-                return False
-
         return True
 
     def _score_daily_product_combo(self, picks: list[PickRecord], *, sport: Sport) -> tuple[float, float]:
@@ -1386,12 +1380,19 @@ class PicksService:
         if target_min <= combined_odds <= target_max:
             odds_score = 1.0
         elif combined_odds < target_min:
-            odds_score = max(0.0, 1.0 - (target_min - combined_odds) * 8.0)
+            odds_score = max(0.0, 1.0 - (target_min - combined_odds) * 5.0)
         else:
             odds_score = max(0.0, 1.0 - (combined_odds - target_max) * 6.0)
 
         diversity_penalty = sum(max(0, count - 1) for count in market_counts.values()) * 0.08
         primary_bonus = 0.04 if any(pick.is_primary for pick in picks) else 0.0
+        size_bonus = 0.0
+        if len(picks) == 2 and combined_odds >= (target_min - 0.03) and avg_confidence >= 0.68:
+            size_bonus = float(self._settings.daily_product_prefer_two_leg_bonus)
+        elif len(picks) == 3 and target_min <= combined_odds <= target_max and avg_confidence >= 0.75:
+            size_bonus = float(self._settings.daily_product_prefer_three_leg_bonus)
+        elif len(picks) == 1 and combined_odds < target_min:
+            size_bonus = -0.03
 
         if sport == Sport.SOCCER:
             safe_bonus = sum(
@@ -1405,10 +1406,15 @@ class PicksService:
                 }
             )
         else:
-            mixed_side_bonus = 0.03 if len({self._basketball_selection_side(pick.selection) for pick in picks}) > 1 else 0.0
+            mixed_side_bonus = (
+                0.03
+                if self._settings.basketball_daily_product_prefer_mixed_sides
+                and len({self._basketball_selection_side(pick.selection) for pick in picks}) > 1
+                else 0.0
+            )
             safe_bonus = mixed_side_bonus
 
-        score = (avg_confidence * 0.7) + (odds_score * 0.3) + safe_bonus + primary_bonus - diversity_penalty
+        score = (avg_confidence * 0.7) + (odds_score * 0.3) + safe_bonus + primary_bonus + size_bonus - diversity_penalty
         return score, combined_odds
 
     def _basketball_selection_side(self, selection: str) -> str:

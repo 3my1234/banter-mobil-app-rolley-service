@@ -35,6 +35,10 @@ def _run_lightweight_migrations() -> None:
             columns = {column['name'] for column in inspector.get_columns('rolley_stake_daily_results')}
             if 'daily_product_id' not in columns:
                 connection.execute(text('ALTER TABLE rolley_stake_daily_results ADD COLUMN daily_product_id VARCHAR(36)'))
+        if 'rolley_daily_products' in inspector.get_table_names():
+            columns = {column['name'] for column in inspector.get_columns('rolley_daily_products')}
+            if 'manual_factor_override' not in columns:
+                connection.execute(text('ALTER TABLE rolley_daily_products ADD COLUMN manual_factor_override FLOAT'))
         if 'rolley_pick_settlements' in inspector.get_table_names():
             columns = {column['name'] for column in inspector.get_columns('rolley_pick_settlements')}
             if 'movement_tx_hash' not in columns:

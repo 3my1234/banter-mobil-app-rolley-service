@@ -8,7 +8,11 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .schemas import (
+    AdminStakeListResponse,
+    AdminStakePayoutResponse,
     AutoSettlementResponse,
+    DailyProductFactorOverrideRequest,
+    DailyProductFactorOverrideResponse,
     DailyProductsResponse,
     MovementWalletStatusResponse,
     PerformanceStatsResponse,
@@ -246,6 +250,47 @@ def get_rollover_summary(
     if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
     return service.get_rollover_summary(db, as_of_date=as_of_date or date.today())
+
+
+@app.get(f'{settings.api_prefix}/admin/rollover/positions', response_model=AdminStakeListResponse)
+def get_rollover_positions(
+    as_of_date: date | None = Query(default=None),
+    status: str | None = Query(default=None),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    return service.list_rollover_positions(db, as_of_date=as_of_date or date.today(), status=status)
+
+
+@app.post(f'{settings.api_prefix}/admin/rollover/positions/{{stake_id}}/payout', response_model=AdminStakePayoutResponse)
+def payout_rollover_position(
+    stake_id: str,
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    try:
+        return service.admin_payout_stake(db, stake_id=stake_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post(f'{settings.api_prefix}/admin/products/{{product_id}}/factor', response_model=DailyProductFactorOverrideResponse)
+def override_daily_product_factor(
+    product_id: str,
+    payload: DailyProductFactorOverrideRequest = Body(...),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    try:
+        return service.override_daily_product_factor(db, product_id=product_id, factor=payload.factor)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.get(f'{settings.api_prefix}/stats/performance', response_model=PerformanceStatsResponse)

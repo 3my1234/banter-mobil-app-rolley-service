@@ -94,6 +94,7 @@ class DailyProduct(Base):
     kind: Mapped[str] = mapped_column(String(20), default='SINGLE')  # SINGLE/BASKET
     combined_confidence: Mapped[float] = mapped_column(Float, default=0.0)
     combined_odds: Mapped[float] = mapped_column(Float, default=1.0)
+    manual_factor_override: Mapped[float | None] = mapped_column(Float, default=None)
     settled_factor: Mapped[float | None] = mapped_column(Float, default=None)
     status: Mapped[str] = mapped_column(String(20), default='OPEN', index=True)  # OPEN/CLOSED/SETTLED
     outcome: Mapped[str] = mapped_column(String(12), default='PENDING', index=True)  # PENDING/WIN/LOSS/VOID

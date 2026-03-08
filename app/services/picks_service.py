@@ -18,7 +18,10 @@ from ..providers.sports_provider import SportsDataProvider
 from ..reasoning import Decision, ProbabilityEngine, RolleyDecisionEngine
 from .movement_client import MovementClient
 from ..schemas import (
+    AdminStakeListResponse,
+    AdminStakePayoutResponse,
     AutoSettlementResponse,
+    DailyProductFactorOverrideResponse,
     DailyProductLegView,
     DailyProductsResponse,
     DailyProductView,
@@ -688,6 +691,69 @@ class PicksService:
             by_sport=by_sport,
         )
 
+    def list_rollover_positions(self, db: Session, *, as_of_date: date, status: str | None = None) -> AdminStakeListResponse:
+        query = (
+            select(StakePosition)
+            .options(joinedload(StakePosition.daily_results))
+            .order_by(StakePosition.created_at.desc())
+        )
+        if status:
+            query = query.where(StakePosition.status == status)
+        rows = db.execute(query).unique().scalars().all()
+        return AdminStakeListResponse(
+            as_of_date=as_of_date,
+            status=status,
+            stakes=[self._to_stake_view(row) for row in rows],
+        )
+
+    def admin_payout_stake(self, db: Session, *, stake_id: str) -> AdminStakePayoutResponse:
+        position = db.scalar(select(StakePosition).where(StakePosition.id == stake_id))
+        if not position:
+            raise ValueError('Stake not found')
+        if position.status != StakeStatus.MATURED.value:
+            raise ValueError('Stake must be matured before payout')
+
+        position.status = StakeStatus.WITHDRAWN.value
+        position.withdrawn_at = datetime.utcnow()
+        db.add(position)
+        db.commit()
+        db.refresh(position)
+        return AdminStakePayoutResponse(success=True, stake=self._to_stake_view(position))
+
+    def override_daily_product_factor(
+        self,
+        db: Session,
+        *,
+        product_id: str,
+        factor: float | None,
+    ) -> DailyProductFactorOverrideResponse:
+        daily_product = db.scalar(
+            select(DailyProduct)
+            .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick))
+            .where(DailyProduct.id == product_id)
+        )
+        if not daily_product:
+            raise ValueError('Daily product not found')
+
+        daily_product.manual_factor_override = factor
+        if daily_product.outcome == SettlementOutcome.WIN.value:
+            daily_product.settled_factor = factor if factor and factor > 0 else float(
+                self._compute_daily_product_factor_from_legs(daily_product)
+            )
+            self._recalculate_product_stakes(db, daily_product=daily_product)
+        elif daily_product.outcome in {SettlementOutcome.PENDING.value, SettlementOutcome.VOID.value}:
+            daily_product.settled_factor = None if daily_product.outcome == SettlementOutcome.PENDING.value else 1.0
+
+        db.add(daily_product)
+        db.commit()
+        db.refresh(daily_product)
+        refreshed = db.scalar(
+            select(DailyProduct)
+            .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick))
+            .where(DailyProduct.id == daily_product.id)
+        )
+        return DailyProductFactorOverrideResponse(success=True, product=self._to_daily_product_view(refreshed or daily_product))
+
     def withdraw_stake(self, db: Session, *, stake_id: str, user_id: str) -> StakeWithdrawResponse:
         position = db.scalar(
             select(StakePosition).where(StakePosition.id == stake_id, StakePosition.user_id == user_id)
@@ -764,6 +830,128 @@ class PicksService:
             db.add(position)
 
         db.flush()
+
+    def _recalculate_product_stakes(self, db: Session, *, daily_product: DailyProduct) -> None:
+        rows = (
+            db.execute(
+                select(StakeDailyResult)
+                .options(joinedload(StakeDailyResult.stake))
+                .where(StakeDailyResult.daily_product_id == daily_product.id)
+                .order_by(StakeDailyResult.created_at.asc())
+            )
+            .unique()
+            .scalars()
+            .all()
+        )
+        if not rows:
+            return
+
+        factor = self._daily_product_factor(daily_product)
+        affected_stake_ids = {row.stake_id for row in rows}
+        for row in rows:
+            starting = Decimal(row.starting_raw)
+            if SettlementOutcome(daily_product.outcome) == SettlementOutcome.LOSS:
+                ending = Decimal('0')
+            elif SettlementOutcome(daily_product.outcome) == SettlementOutcome.VOID:
+                ending = starting
+            else:
+                ending = (starting * factor).quantize(Decimal('1'), rounding=ROUND_FLOOR)
+            row.factor = float(factor)
+            row.ending_raw = str(max(ending, Decimal('0')))
+            if row.stake:
+                row.stake.current_raw = row.ending_raw
+                row.stake.total_factor = self._recompute_total_factor(db, stake_id=row.stake.id)
+                self._recompute_stake_terminal_state(row.stake)
+                db.add(row.stake)
+            db.add(row)
+
+        for stake_id in affected_stake_ids:
+            stake = db.scalar(
+                select(StakePosition)
+                .options(joinedload(StakePosition.daily_results))
+                .where(StakePosition.id == stake_id)
+            )
+            if stake:
+                self._recompute_stake_from_results(stake)
+                db.add(stake)
+
+        db.flush()
+
+    def _recompute_total_factor(self, db: Session, *, stake_id: str) -> float:
+        rows = db.scalars(
+            select(StakeDailyResult)
+            .where(StakeDailyResult.stake_id == stake_id)
+            .order_by(StakeDailyResult.pick_date.asc(), StakeDailyResult.created_at.asc())
+        ).all()
+        total = Decimal('1')
+        for row in rows:
+            total *= Decimal(str(max(0.0, row.factor)))
+        return float(total.quantize(Decimal('0.0001')))
+
+    def _recompute_stake_terminal_state(self, position: StakePosition) -> None:
+        if position.status == StakeStatus.WITHDRAWN.value:
+            return
+        results = sorted(list(position.daily_results or []), key=lambda item: (item.pick_date, item.created_at))
+        if not results:
+            position.status = StakeStatus.ACTIVE.value
+            position.gross_profit_raw = '0'
+            position.platform_fee_raw = '0'
+            position.net_payout_raw = '0'
+            position.matured_at = None
+            return
+        latest = results[-1]
+        position.current_raw = latest.ending_raw
+        if latest.outcome == SettlementOutcome.LOSS.value:
+            position.status = StakeStatus.LOST.value
+            position.gross_profit_raw = '0'
+            position.platform_fee_raw = '0'
+            position.net_payout_raw = '0'
+            if not position.matured_at:
+                position.matured_at = datetime.utcnow()
+            return
+        if len(results) >= position.lock_days:
+            position.status = StakeStatus.MATURED.value
+            if not position.matured_at:
+                position.matured_at = datetime.utcnow()
+            self._mature_position(position)
+            return
+        position.status = StakeStatus.ACTIVE.value
+        position.gross_profit_raw = '0'
+        position.platform_fee_raw = '0'
+        position.net_payout_raw = '0'
+        position.matured_at = None
+
+    def _recompute_stake_from_results(self, position: StakePosition) -> None:
+        ordered_results = sorted(list(position.daily_results or []), key=lambda item: (item.pick_date, item.created_at))
+        current = Decimal(position.principal_raw)
+        total_factor = Decimal('1')
+        position.status = StakeStatus.ACTIVE.value
+        position.gross_profit_raw = '0'
+        position.platform_fee_raw = '0'
+        position.net_payout_raw = '0'
+        position.matured_at = None
+        for item in ordered_results:
+            item.starting_raw = str(current)
+            factor = Decimal(str(item.factor))
+            if item.outcome == SettlementOutcome.LOSS.value:
+                current = Decimal('0')
+                item.ending_raw = '0'
+                total_factor = Decimal('0')
+                position.status = StakeStatus.LOST.value
+                position.matured_at = datetime.utcnow()
+                break
+            if item.outcome == SettlementOutcome.VOID.value:
+                item.factor = 1.0
+                item.ending_raw = str(current)
+            else:
+                current = (current * factor).quantize(Decimal('1'), rounding=ROUND_FLOOR)
+                item.ending_raw = str(max(current, Decimal('0')))
+                total_factor *= factor
+            current = Decimal(item.ending_raw)
+        position.current_raw = str(current)
+        position.total_factor = float(total_factor.quantize(Decimal('0.0001')))
+        if position.status == StakeStatus.ACTIVE.value and len(ordered_results) >= position.lock_days:
+            self._mature_position(position)
 
     def _mature_position(self, position: StakePosition) -> None:
         if position.status != StakeStatus.ACTIVE.value:
@@ -1556,6 +1744,10 @@ class PicksService:
     def _compute_daily_product_factor_from_legs(self, daily_product: DailyProduct) -> Decimal:
         if daily_product.outcome == SettlementOutcome.LOSS.value:
             return Decimal('0')
+        if daily_product.outcome == SettlementOutcome.VOID.value:
+            return Decimal('1')
+        if daily_product.manual_factor_override is not None and daily_product.manual_factor_override > 0:
+            return Decimal(str(daily_product.manual_factor_override)).quantize(Decimal('0.0001'))
         factor = Decimal('1')
         for leg in daily_product.legs:
             if not leg.pick or not leg.pick.settlement:
@@ -1572,6 +1764,8 @@ class PicksService:
             return Decimal('0')
         if daily_product.outcome == SettlementOutcome.VOID.value:
             return Decimal('1')
+        if daily_product.manual_factor_override is not None and daily_product.manual_factor_override > 0:
+            return Decimal(str(daily_product.manual_factor_override)).quantize(Decimal('0.0001'))
         if daily_product.settled_factor is not None and daily_product.settled_factor > 0:
             return Decimal(str(daily_product.settled_factor))
         return Decimal(str(max(1.0, daily_product.combined_odds)))
@@ -1639,6 +1833,7 @@ class PicksService:
             kind=row.kind,
             combined_confidence=row.combined_confidence,
             combined_odds=row.combined_odds,
+            manual_factor_override=row.manual_factor_override,
             settled_factor=row.settled_factor,
             status=row.status,
             outcome=SettlementOutcome(row.outcome),

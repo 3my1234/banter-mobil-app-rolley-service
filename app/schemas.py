@@ -142,6 +142,7 @@ class DailyProductView(BaseModel):
     kind: str
     combined_confidence: float
     combined_odds: float
+    manual_factor_override: float | None = None
     settled_factor: float | None = None
     status: str
     outcome: SettlementOutcome = SettlementOutcome.PENDING
@@ -284,3 +285,23 @@ class RolloverSummaryResponse(BaseModel):
     matured_payout_rol: float
     accrued_platform_fee_rol: float
     by_sport: list[RolloverSportSummaryView] = Field(default_factory=list)
+
+
+class DailyProductFactorOverrideRequest(BaseModel):
+    factor: float | None = Field(default=None, ge=1.0, le=10.0)
+
+
+class DailyProductFactorOverrideResponse(BaseModel):
+    success: bool
+    product: DailyProductView
+
+
+class AdminStakeListResponse(BaseModel):
+    as_of_date: date
+    status: StakeStatus | str | None = None
+    stakes: list[StakePositionView] = Field(default_factory=list)
+
+
+class AdminStakePayoutResponse(BaseModel):
+    success: bool
+    stake: StakePositionView

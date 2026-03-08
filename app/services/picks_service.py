@@ -619,7 +619,7 @@ class PicksService:
         )
 
     def create_stake(self, db: Session, payload: StakeCreateRequest) -> StakeCreateResponse:
-        starts_on = date.today()
+        starts_on = self._stake_start_date(db, sport=payload.sport)
         ends_on = starts_on + timedelta(days=payload.lock_days)
         asset_decimals = self._asset_decimals(payload.stake_asset)
         principal_raw = asset_amount_to_raw(payload.amount, decimals=asset_decimals)
@@ -641,6 +641,18 @@ class PicksService:
         db.commit()
         db.refresh(position)
         return StakeCreateResponse(success=True, stake=self._to_stake_view(position))
+
+    def _stake_start_date(self, db: Session, *, sport: Sport) -> date:
+        today = date.today()
+        daily_product = db.scalar(
+            select(DailyProduct).where(
+                DailyProduct.product_date == today,
+                DailyProduct.sport == sport.value,
+            )
+        )
+        if daily_product and daily_product.outcome != SettlementOutcome.PENDING.value:
+            return today + timedelta(days=1)
+        return today
 
     def list_stakes(self, db: Session, *, user_id: str) -> StakeListResponse:
         rows = (

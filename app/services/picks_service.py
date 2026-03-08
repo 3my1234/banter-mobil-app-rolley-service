@@ -1312,9 +1312,7 @@ class PicksService:
         ).all()
 
         existing = db.scalar(
-            select(DailyProduct)
-            .options(joinedload(DailyProduct.legs))
-            .where(DailyProduct.product_date == target_date, DailyProduct.sport == sport.value)
+            select(DailyProduct).where(DailyProduct.product_date == target_date, DailyProduct.sport == sport.value)
         )
 
         if not picks:
@@ -1335,6 +1333,7 @@ class PicksService:
 
         db.execute(delete(DailyProductLeg).where(DailyProductLeg.daily_product_id == existing.id))
         db.flush()
+        db.expire(existing)
 
         combined_odds = Decimal('1')
         total_confidence = Decimal('0')

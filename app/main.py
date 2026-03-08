@@ -15,6 +15,7 @@ from .schemas import (
     PickHistoryResponse,
     PickSettlementPayload,
     RefreshResponse,
+    RolloverSummaryResponse,
     Sport,
     StakeCreateRequest,
 )
@@ -234,6 +235,17 @@ async def auto_settle_picks(
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
     target_date = pick_date or (date.today() - timedelta(days=max(settings.auto_settlement_offset_days, 1)))
     return await service.auto_settle_date(db, target_date=target_date, settled_by='ADMIN_AUTO')
+
+
+@app.get(f'{settings.api_prefix}/admin/rollover/summary', response_model=RolloverSummaryResponse)
+def get_rollover_summary(
+    as_of_date: date | None = Query(default=None),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    return service.get_rollover_summary(db, as_of_date=as_of_date or date.today())
 
 
 @app.get(f'{settings.api_prefix}/stats/performance', response_model=PerformanceStatsResponse)

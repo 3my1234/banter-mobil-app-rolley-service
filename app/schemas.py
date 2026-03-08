@@ -211,6 +211,18 @@ class StakeCreateRequest(BaseModel):
     lock_days: int = Field(ge=5, le=30)
 
 
+class StakeDailyResultView(BaseModel):
+    id: str
+    daily_product_id: str | None = None
+    pick_id: str
+    pick_date: date
+    outcome: SettlementOutcome
+    factor: float
+    starting_rol: float
+    ending_rol: float
+    created_at: datetime
+
+
 class StakePositionView(BaseModel):
     id: str
     user_id: str
@@ -218,6 +230,8 @@ class StakePositionView(BaseModel):
     principal_rol: float
     current_rol: float
     lock_days: int
+    days_completed: int
+    days_remaining: int
     starts_on: date
     ends_on: date
     status: StakeStatus
@@ -225,10 +239,13 @@ class StakePositionView(BaseModel):
     gross_profit_rol: float
     platform_fee_rol: float
     net_payout_rol: float
+    latest_pick_date: date | None = None
+    latest_outcome: SettlementOutcome | None = None
     matured_at: datetime | None = None
     withdrawn_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    daily_results: list[StakeDailyResultView] = Field(default_factory=list)
 
 
 class StakeCreateResponse(BaseModel):
@@ -244,3 +261,26 @@ class StakeListResponse(BaseModel):
 class StakeWithdrawResponse(BaseModel):
     success: bool
     stake: StakePositionView
+
+
+class RolloverSportSummaryView(BaseModel):
+    sport: Sport
+    active_positions: int
+    lost_positions: int
+    matured_positions: int
+    withdrawn_positions: int
+    active_principal_rol: float
+    active_current_rol: float
+    matured_payout_rol: float
+    accrued_platform_fee_rol: float
+
+
+class RolloverSummaryResponse(BaseModel):
+    as_of_date: date
+    active_positions: int
+    active_users: int
+    active_principal_rol: float
+    active_current_rol: float
+    matured_payout_rol: float
+    accrued_platform_fee_rol: float
+    by_sport: list[RolloverSportSummaryView] = Field(default_factory=list)

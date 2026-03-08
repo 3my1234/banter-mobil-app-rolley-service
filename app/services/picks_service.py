@@ -30,10 +30,13 @@ from ..schemas import (
     PerformanceStatsResponse,
     RefreshResponse,
     RolleyPick,
+    RolloverSportSummaryView,
+    RolloverSummaryResponse,
     SettlementOutcome,
     Sport,
     StakeCreateRequest,
     StakeCreateResponse,
+    StakeDailyResultView,
     StakeListResponse,
     StakePositionView,
     StakeStatus,
@@ -614,10 +617,76 @@ class PicksService:
         return StakeCreateResponse(success=True, stake=self._to_stake_view(position))
 
     def list_stakes(self, db: Session, *, user_id: str) -> StakeListResponse:
-        rows = db.scalars(
-            select(StakePosition).where(StakePosition.user_id == user_id).order_by(StakePosition.created_at.desc())
-        ).all()
+        rows = (
+            db.execute(
+                select(StakePosition)
+                .options(joinedload(StakePosition.daily_results))
+                .where(StakePosition.user_id == user_id)
+                .order_by(StakePosition.created_at.desc())
+            )
+            .unique()
+            .scalars()
+            .all()
+        )
         return StakeListResponse(user_id=user_id, stakes=[self._to_stake_view(row) for row in rows])
+
+    def get_rollover_summary(self, db: Session, *, as_of_date: date) -> RolloverSummaryResponse:
+        rows = (
+            db.execute(
+                select(StakePosition)
+                .options(joinedload(StakePosition.daily_results))
+                .order_by(StakePosition.created_at.desc())
+            )
+            .unique()
+            .scalars()
+            .all()
+        )
+
+        active_rows = [row for row in rows if row.status == StakeStatus.ACTIVE.value]
+        matured_rows = [row for row in rows if row.status == StakeStatus.MATURED.value]
+
+        def _sum_raw(items: list[StakePosition], attr: str) -> float:
+            total = Decimal('0')
+            for item in items:
+                total += Decimal(str(getattr(item, attr)))
+            return raw_to_rol(str(total))
+
+        by_sport: list[RolloverSportSummaryView] = []
+        for sport in Sport:
+            sport_rows = [row for row in rows if row.sport == sport.value]
+            by_sport.append(
+                RolloverSportSummaryView(
+                    sport=sport,
+                    active_positions=sum(1 for row in sport_rows if row.status == StakeStatus.ACTIVE.value),
+                    lost_positions=sum(1 for row in sport_rows if row.status == StakeStatus.LOST.value),
+                    matured_positions=sum(1 for row in sport_rows if row.status == StakeStatus.MATURED.value),
+                    withdrawn_positions=sum(1 for row in sport_rows if row.status == StakeStatus.WITHDRAWN.value),
+                    active_principal_rol=_sum_raw(
+                        [row for row in sport_rows if row.status == StakeStatus.ACTIVE.value],
+                        'principal_raw',
+                    ),
+                    active_current_rol=_sum_raw(
+                        [row for row in sport_rows if row.status == StakeStatus.ACTIVE.value],
+                        'current_raw',
+                    ),
+                    matured_payout_rol=_sum_raw(
+                        [row for row in sport_rows if row.status == StakeStatus.MATURED.value],
+                        'net_payout_raw',
+                    ),
+                    accrued_platform_fee_rol=_sum_raw(sport_rows, 'platform_fee_raw'),
+                )
+            )
+
+        return RolloverSummaryResponse(
+            as_of_date=as_of_date,
+            active_positions=len(active_rows),
+            active_users=len({row.user_id for row in active_rows}),
+            active_principal_rol=_sum_raw(active_rows, 'principal_raw'),
+            active_current_rol=_sum_raw(active_rows, 'current_raw'),
+            matured_payout_rol=_sum_raw(matured_rows, 'net_payout_raw'),
+            accrued_platform_fee_rol=_sum_raw(rows, 'platform_fee_raw'),
+            by_sport=by_sport,
+        )
 
     def withdraw_stake(self, db: Session, *, stake_id: str, user_id: str) -> StakeWithdrawResponse:
         position = db.scalar(
@@ -1608,6 +1677,11 @@ class PicksService:
         db.commit()
 
     def _to_stake_view(self, row: StakePosition) -> StakePositionView:
+        ordered_results = sorted(
+            list(row.daily_results or []),
+            key=lambda item: (item.pick_date, item.created_at),
+        )
+        latest_result = ordered_results[-1] if ordered_results else None
         return StakePositionView(
             id=row.id,
             user_id=row.user_id,
@@ -1615,6 +1689,8 @@ class PicksService:
             principal_rol=raw_to_rol(row.principal_raw),
             current_rol=raw_to_rol(row.current_raw),
             lock_days=row.lock_days,
+            days_completed=min(len(ordered_results), row.lock_days),
+            days_remaining=max(row.lock_days - len(ordered_results), 0),
             starts_on=row.starts_on,
             ends_on=row.ends_on,
             status=StakeStatus(row.status),
@@ -1622,8 +1698,24 @@ class PicksService:
             gross_profit_rol=raw_to_rol(row.gross_profit_raw),
             platform_fee_rol=raw_to_rol(row.platform_fee_raw),
             net_payout_rol=raw_to_rol(row.net_payout_raw),
+            latest_pick_date=latest_result.pick_date if latest_result else None,
+            latest_outcome=SettlementOutcome(latest_result.outcome) if latest_result else None,
             matured_at=row.matured_at,
             withdrawn_at=row.withdrawn_at,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            daily_results=[
+                StakeDailyResultView(
+                    id=item.id,
+                    daily_product_id=item.daily_product_id,
+                    pick_id=item.pick_id,
+                    pick_date=item.pick_date,
+                    outcome=SettlementOutcome(item.outcome),
+                    factor=item.factor,
+                    starting_rol=raw_to_rol(item.starting_raw),
+                    ending_rol=raw_to_rol(item.ending_raw),
+                    created_at=item.created_at,
+                )
+                for item in ordered_results
+            ],
         )

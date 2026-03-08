@@ -22,6 +22,12 @@ class StakeStatus(str, Enum):
     WITHDRAWN = 'WITHDRAWN'
 
 
+class StakeAsset(str, Enum):
+    USD = 'USD'
+    USDC = 'USDC'
+    ROL = 'ROL'
+
+
 class MatchContext(BaseModel):
     urgency_score: float = Field(ge=0, le=10)
     volatility_index: float = Field(ge=0, le=10)
@@ -208,7 +214,8 @@ class PerformanceStatsResponse(BaseModel):
 class StakeCreateRequest(BaseModel):
     user_id: str = Field(min_length=2, max_length=120)
     sport: Sport
-    amount_rol: float = Field(gt=0)
+    stake_asset: StakeAsset
+    amount: float = Field(gt=0)
     lock_days: int = Field(ge=5, le=30)
 
 
@@ -219,8 +226,8 @@ class StakeDailyResultView(BaseModel):
     pick_date: date
     outcome: SettlementOutcome
     factor: float
-    starting_rol: float
-    ending_rol: float
+    starting_amount: float
+    ending_amount: float
     created_at: datetime
 
 
@@ -228,8 +235,9 @@ class StakePositionView(BaseModel):
     id: str
     user_id: str
     sport: Sport
-    principal_rol: float
-    current_rol: float
+    stake_asset: StakeAsset
+    principal_amount: float
+    current_amount: float
     lock_days: int
     days_completed: int
     days_remaining: int
@@ -237,9 +245,9 @@ class StakePositionView(BaseModel):
     ends_on: date
     status: StakeStatus
     total_factor: float
-    gross_profit_rol: float
-    platform_fee_rol: float
-    net_payout_rol: float
+    gross_profit_amount: float
+    platform_fee_amount: float
+    net_payout_amount: float
     latest_pick_date: date | None = None
     latest_outcome: SettlementOutcome | None = None
     matured_at: datetime | None = None
@@ -270,20 +278,21 @@ class RolloverSportSummaryView(BaseModel):
     lost_positions: int
     matured_positions: int
     withdrawn_positions: int
-    active_principal_rol: float
-    active_current_rol: float
-    matured_payout_rol: float
-    accrued_platform_fee_rol: float
+    active_principal_amount: float
+    active_current_amount: float
+    matured_payout_amount: float
+    accrued_platform_fee_amount: float
 
 
 class RolloverSummaryResponse(BaseModel):
     as_of_date: date
+    stake_asset: StakeAsset
     active_positions: int
     active_users: int
-    active_principal_rol: float
-    active_current_rol: float
-    matured_payout_rol: float
-    accrued_platform_fee_rol: float
+    active_principal_amount: float
+    active_current_amount: float
+    matured_payout_amount: float
+    accrued_platform_fee_amount: float
     by_sport: list[RolloverSportSummaryView] = Field(default_factory=list)
 
 
@@ -298,6 +307,7 @@ class DailyProductFactorOverrideResponse(BaseModel):
 
 class AdminStakeListResponse(BaseModel):
     as_of_date: date
+    stake_asset: StakeAsset
     status: StakeStatus | str | None = None
     stakes: list[StakePositionView] = Field(default_factory=list)
 

@@ -142,6 +142,8 @@ class StakePosition(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(120), index=True)
     sport: Mapped[str] = mapped_column(String(20), index=True)
+    stake_asset: Mapped[str] = mapped_column(String(16), default='ROL', index=True)
+    asset_decimals: Mapped[int] = mapped_column(Integer, default=8)
 
     principal_raw: Mapped[str] = mapped_column(String(40))  # 1e8 decimals as integer string
     current_raw: Mapped[str] = mapped_column(String(40))

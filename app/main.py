@@ -21,6 +21,7 @@ from .schemas import (
     RefreshResponse,
     RolloverSummaryResponse,
     Sport,
+    StakeAsset,
     StakeCreateRequest,
 )
 from .services.picks_service import PicksService
@@ -244,24 +245,26 @@ async def auto_settle_picks(
 @app.get(f'{settings.api_prefix}/admin/rollover/summary', response_model=RolloverSummaryResponse)
 def get_rollover_summary(
     as_of_date: date | None = Query(default=None),
+    stake_asset: StakeAsset = Query(default=StakeAsset.USD),
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
     if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
-    return service.get_rollover_summary(db, as_of_date=as_of_date or date.today())
+    return service.get_rollover_summary_by_asset(db, as_of_date=as_of_date or date.today(), stake_asset=stake_asset)
 
 
 @app.get(f'{settings.api_prefix}/admin/rollover/positions', response_model=AdminStakeListResponse)
 def get_rollover_positions(
     as_of_date: date | None = Query(default=None),
+    stake_asset: StakeAsset = Query(default=StakeAsset.USD),
     status: str | None = Query(default=None),
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
     if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
-    return service.list_rollover_positions(db, as_of_date=as_of_date or date.today(), status=status)
+    return service.list_rollover_positions(db, as_of_date=as_of_date or date.today(), stake_asset=stake_asset, status=status)
 
 
 @app.post(f'{settings.api_prefix}/admin/rollover/positions/{{stake_id}}/payout', response_model=AdminStakePayoutResponse)

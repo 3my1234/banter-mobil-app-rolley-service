@@ -39,6 +39,7 @@ from ..schemas import (
     Sport,
     StakeCreateRequest,
     StakeCreateResponse,
+    StakeAsset,
     StakeDailyResultView,
     StakeListResponse,
     StakePositionView,
@@ -47,7 +48,11 @@ from ..schemas import (
 )
 
 
-ROL_DECIMALS = Decimal('100000000')
+ASSET_DECIMALS = {
+    'USD': 2,
+    'USDC': 6,
+    'ROL': 8,
+}
 TEN_PERCENT = Decimal('0.10')
 SAFE_SOCCER_PRIMARY_MARKETS = {'TOTAL_GOALS', 'DOUBLE_CHANCE'}
 logger = logging.getLogger(__name__)
@@ -70,15 +75,17 @@ class StagedPrediction:
     risk: LeagueRiskProfile
 
 
-def rol_to_raw(amount_rol: float | Decimal) -> str:
-    value = Decimal(str(amount_rol))
-    raw = (value * ROL_DECIMALS).quantize(Decimal('1'), rounding=ROUND_FLOOR)
+def asset_amount_to_raw(amount: float | Decimal, *, decimals: int) -> str:
+    value = Decimal(str(amount))
+    scale = Decimal(10) ** decimals
+    raw = (value * scale).quantize(Decimal('1'), rounding=ROUND_FLOOR)
     return str(max(raw, Decimal('0')))
 
 
-def raw_to_rol(raw: str | int | Decimal) -> float:
+def raw_to_asset_amount(raw: str | int | Decimal, *, decimals: int) -> float:
     value = Decimal(str(raw))
-    return float(value / ROL_DECIMALS)
+    scale = Decimal(10) ** decimals
+    return float(value / scale)
 
 
 class PicksService:
@@ -89,6 +96,19 @@ class PicksService:
         self._probability = ProbabilityEngine()
         self._decision = RolleyDecisionEngine()
         self._movement = MovementClient()
+
+    def _asset_decimals(self, stake_asset: str | StakeAsset) -> int:
+        key = stake_asset.value if isinstance(stake_asset, StakeAsset) else str(stake_asset or 'ROL').upper()
+        return ASSET_DECIMALS.get(key, 8)
+
+    def _position_amount(self, raw: str | int | Decimal, *, position: StakePosition) -> float:
+        return raw_to_asset_amount(raw, decimals=position.asset_decimals or self._asset_decimals(position.stake_asset))
+
+    def _sum_rows_amount(self, rows: list[StakePosition], attr: str, *, decimals: int) -> float:
+        total = Decimal('0')
+        for row in rows:
+            total += Decimal(str(getattr(row, attr)))
+        return raw_to_asset_amount(str(total), decimals=decimals)
 
     async def refresh_daily_picks(self, db: Session, *, target_date: date) -> RefreshResponse:
         return await self._refresh_daily_picks(db, target_date=target_date, sport=None, force_rebuild=False)
@@ -601,11 +621,14 @@ class PicksService:
     def create_stake(self, db: Session, payload: StakeCreateRequest) -> StakeCreateResponse:
         starts_on = date.today()
         ends_on = starts_on + timedelta(days=payload.lock_days)
-        principal_raw = rol_to_raw(payload.amount_rol)
+        asset_decimals = self._asset_decimals(payload.stake_asset)
+        principal_raw = asset_amount_to_raw(payload.amount, decimals=asset_decimals)
         position = StakePosition(
             id=str(uuid4()),
             user_id=payload.user_id,
             sport=payload.sport.value,
+            stake_asset=payload.stake_asset.value,
+            asset_decimals=asset_decimals,
             principal_raw=principal_raw,
             current_raw=principal_raw,
             lock_days=payload.lock_days,
@@ -634,10 +657,20 @@ class PicksService:
         return StakeListResponse(user_id=user_id, stakes=[self._to_stake_view(row) for row in rows])
 
     def get_rollover_summary(self, db: Session, *, as_of_date: date) -> RolloverSummaryResponse:
+        return self.get_rollover_summary_by_asset(db, as_of_date=as_of_date, stake_asset=StakeAsset.USD)
+
+    def get_rollover_summary_by_asset(
+        self,
+        db: Session,
+        *,
+        as_of_date: date,
+        stake_asset: StakeAsset,
+    ) -> RolloverSummaryResponse:
         rows = (
             db.execute(
                 select(StakePosition)
                 .options(joinedload(StakePosition.daily_results))
+                .where(StakePosition.stake_asset == stake_asset.value)
                 .order_by(StakePosition.created_at.desc())
             )
             .unique()
@@ -648,11 +681,7 @@ class PicksService:
         active_rows = [row for row in rows if row.status == StakeStatus.ACTIVE.value]
         matured_rows = [row for row in rows if row.status == StakeStatus.MATURED.value]
 
-        def _sum_raw(items: list[StakePosition], attr: str) -> float:
-            total = Decimal('0')
-            for item in items:
-                total += Decimal(str(getattr(item, attr)))
-            return raw_to_rol(str(total))
+        decimals = self._asset_decimals(stake_asset)
 
         by_sport: list[RolloverSportSummaryView] = []
         for sport in Sport:
@@ -664,37 +693,49 @@ class PicksService:
                     lost_positions=sum(1 for row in sport_rows if row.status == StakeStatus.LOST.value),
                     matured_positions=sum(1 for row in sport_rows if row.status == StakeStatus.MATURED.value),
                     withdrawn_positions=sum(1 for row in sport_rows if row.status == StakeStatus.WITHDRAWN.value),
-                    active_principal_rol=_sum_raw(
+                    active_principal_amount=self._sum_rows_amount(
                         [row for row in sport_rows if row.status == StakeStatus.ACTIVE.value],
                         'principal_raw',
+                        decimals=decimals,
                     ),
-                    active_current_rol=_sum_raw(
+                    active_current_amount=self._sum_rows_amount(
                         [row for row in sport_rows if row.status == StakeStatus.ACTIVE.value],
                         'current_raw',
+                        decimals=decimals,
                     ),
-                    matured_payout_rol=_sum_raw(
+                    matured_payout_amount=self._sum_rows_amount(
                         [row for row in sport_rows if row.status == StakeStatus.MATURED.value],
                         'net_payout_raw',
+                        decimals=decimals,
                     ),
-                    accrued_platform_fee_rol=_sum_raw(sport_rows, 'platform_fee_raw'),
+                    accrued_platform_fee_amount=self._sum_rows_amount(sport_rows, 'platform_fee_raw', decimals=decimals),
                 )
             )
 
         return RolloverSummaryResponse(
             as_of_date=as_of_date,
+            stake_asset=stake_asset,
             active_positions=len(active_rows),
             active_users=len({row.user_id for row in active_rows}),
-            active_principal_rol=_sum_raw(active_rows, 'principal_raw'),
-            active_current_rol=_sum_raw(active_rows, 'current_raw'),
-            matured_payout_rol=_sum_raw(matured_rows, 'net_payout_raw'),
-            accrued_platform_fee_rol=_sum_raw(rows, 'platform_fee_raw'),
+            active_principal_amount=self._sum_rows_amount(active_rows, 'principal_raw', decimals=decimals),
+            active_current_amount=self._sum_rows_amount(active_rows, 'current_raw', decimals=decimals),
+            matured_payout_amount=self._sum_rows_amount(matured_rows, 'net_payout_raw', decimals=decimals),
+            accrued_platform_fee_amount=self._sum_rows_amount(rows, 'platform_fee_raw', decimals=decimals),
             by_sport=by_sport,
         )
 
-    def list_rollover_positions(self, db: Session, *, as_of_date: date, status: str | None = None) -> AdminStakeListResponse:
+    def list_rollover_positions(
+        self,
+        db: Session,
+        *,
+        as_of_date: date,
+        stake_asset: StakeAsset,
+        status: str | None = None,
+    ) -> AdminStakeListResponse:
         query = (
             select(StakePosition)
             .options(joinedload(StakePosition.daily_results))
+            .where(StakePosition.stake_asset == stake_asset.value)
             .order_by(StakePosition.created_at.desc())
         )
         if status:
@@ -702,6 +743,7 @@ class PicksService:
         rows = db.execute(query).unique().scalars().all()
         return AdminStakeListResponse(
             as_of_date=as_of_date,
+            stake_asset=stake_asset,
             status=status,
             stakes=[self._to_stake_view(row) for row in rows],
         )
@@ -1882,12 +1924,14 @@ class PicksService:
             key=lambda item: (item.pick_date, item.created_at),
         )
         latest_result = ordered_results[-1] if ordered_results else None
+        decimals = row.asset_decimals or self._asset_decimals(row.stake_asset)
         return StakePositionView(
             id=row.id,
             user_id=row.user_id,
             sport=Sport(row.sport),
-            principal_rol=raw_to_rol(row.principal_raw),
-            current_rol=raw_to_rol(row.current_raw),
+            stake_asset=StakeAsset(row.stake_asset),
+            principal_amount=raw_to_asset_amount(row.principal_raw, decimals=decimals),
+            current_amount=raw_to_asset_amount(row.current_raw, decimals=decimals),
             lock_days=row.lock_days,
             days_completed=min(len(ordered_results), row.lock_days),
             days_remaining=max(row.lock_days - len(ordered_results), 0),
@@ -1895,9 +1939,9 @@ class PicksService:
             ends_on=row.ends_on,
             status=StakeStatus(row.status),
             total_factor=row.total_factor,
-            gross_profit_rol=raw_to_rol(row.gross_profit_raw),
-            platform_fee_rol=raw_to_rol(row.platform_fee_raw),
-            net_payout_rol=raw_to_rol(row.net_payout_raw),
+            gross_profit_amount=raw_to_asset_amount(row.gross_profit_raw, decimals=decimals),
+            platform_fee_amount=raw_to_asset_amount(row.platform_fee_raw, decimals=decimals),
+            net_payout_amount=raw_to_asset_amount(row.net_payout_raw, decimals=decimals),
             latest_pick_date=latest_result.pick_date if latest_result else None,
             latest_outcome=SettlementOutcome(latest_result.outcome) if latest_result else None,
             matured_at=row.matured_at,
@@ -1912,8 +1956,8 @@ class PicksService:
                     pick_date=item.pick_date,
                     outcome=SettlementOutcome(item.outcome),
                     factor=item.factor,
-                    starting_rol=raw_to_rol(item.starting_raw),
-                    ending_rol=raw_to_rol(item.ending_raw),
+                    starting_amount=raw_to_asset_amount(item.starting_raw, decimals=decimals),
+                    ending_amount=raw_to_asset_amount(item.ending_raw, decimals=decimals),
                     created_at=item.created_at,
                 )
                 for item in ordered_results

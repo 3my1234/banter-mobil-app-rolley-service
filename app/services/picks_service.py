@@ -1683,11 +1683,17 @@ class PicksService:
 
     def _refresh_daily_product_from_pick(self, db: Session, *, pick: PickRecord) -> DailyProduct | None:
         if not pick.daily_product_id:
-            self._upsert_daily_product(db, target_date=pick.pick_date, sport=Sport(pick.sport))
-            db.flush()
-            db.refresh(pick)
-        if not pick.daily_product_id:
-            return None
+            existing = db.scalar(
+                select(DailyProduct)
+                .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick).joinedload(PickRecord.settlement))
+                .where(DailyProduct.product_date == pick.pick_date, DailyProduct.sport == pick.sport)
+            )
+            if not existing:
+                self._upsert_daily_product(db, target_date=pick.pick_date, sport=Sport(pick.sport))
+                db.flush()
+                db.refresh(pick)
+            if not pick.daily_product_id:
+                return existing
 
         daily_product = db.scalar(
             select(DailyProduct)

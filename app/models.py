@@ -141,6 +141,7 @@ class StakePosition(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(120), index=True)
+    external_reference: Mapped[str | None] = mapped_column(String(120), unique=True, default=None, index=True)
     sport: Mapped[str] = mapped_column(String(20), index=True)
     stake_asset: Mapped[str] = mapped_column(String(16), default='ROL', index=True)
     asset_decimals: Mapped[int] = mapped_column(Integer, default=8)

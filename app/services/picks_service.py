@@ -619,6 +619,12 @@ class PicksService:
         )
 
     def create_stake(self, db: Session, payload: StakeCreateRequest) -> StakeCreateResponse:
+        if payload.external_reference:
+            existing = db.scalar(
+                select(StakePosition).where(StakePosition.external_reference == payload.external_reference)
+            )
+            if existing:
+                return StakeCreateResponse(success=True, stake=self._to_stake_view(existing))
         starts_on = self._stake_start_date(db, sport=payload.sport)
         ends_on = starts_on + timedelta(days=payload.lock_days)
         asset_decimals = self._asset_decimals(payload.stake_asset)
@@ -626,6 +632,7 @@ class PicksService:
         position = StakePosition(
             id=str(uuid4()),
             user_id=payload.user_id,
+            external_reference=payload.external_reference,
             sport=payload.sport.value,
             stake_asset=payload.stake_asset.value,
             asset_decimals=asset_decimals,

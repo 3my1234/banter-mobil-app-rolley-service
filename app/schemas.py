@@ -213,6 +213,7 @@ class PerformanceStatsResponse(BaseModel):
 
 class StakeCreateRequest(BaseModel):
     user_id: str = Field(min_length=2, max_length=120)
+    external_reference: str | None = Field(default=None, min_length=2, max_length=120)
     sport: Sport
     stake_asset: StakeAsset
     amount: float = Field(gt=0)

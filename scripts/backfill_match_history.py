@@ -17,8 +17,16 @@ def _parse_date(value: str) -> date:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill completed match history into rolley_match_history.")
-    parser.add_argument("--start-date", required=True, help="YYYY-MM-DD (inclusive)")
-    parser.add_argument("--end-date", required=True, help="YYYY-MM-DD (inclusive)")
+    parser.add_argument(
+        "--start-date",
+        default="2022-01-01",
+        help="YYYY-MM-DD (inclusive). Defaults to 2022-01-01 for deeper football H2H coverage.",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=date.today().isoformat(),
+        help="YYYY-MM-DD (inclusive). Defaults to today.",
+    )
     parser.add_argument(
         "--sports",
         default="SOCCER,BASKETBALL",
@@ -67,4 +75,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

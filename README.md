@@ -88,7 +88,9 @@ python scripts/train_xgboost.py
 ## Backfill match history (for richer training data)
 ```bash
 cd rolley-service
-python scripts/backfill_match_history.py --start-date 2024-01-01 --end-date 2026-03-04 --sports SOCCER,BASKETBALL
+python scripts/backfill_match_history.py --start-date 2022-01-01 --end-date 2026-03-09 --sports SOCCER,BASKETBALL
+# or just use defaults:
+# python scripts/backfill_match_history.py
 ```
 This fills `rolley_match_history` with completed matches from provider scoreboards so you can export/train on much larger real history.
 

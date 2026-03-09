@@ -143,7 +143,7 @@ async def _run_candidate_backtest(
     while day <= date_to:
         with SessionLocal() as db:
             await service.refresh_daily_picks(db, target_date=day)
-            service.auto_settle_date(db, target_date=day, settled_by="BACKTEST")
+            await service.auto_settle_date(db, target_date=day, settled_by="BACKTEST")
             if not candidate_version:
                 row = db.scalar(
                     select(PickRecord.model_version)

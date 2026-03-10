@@ -23,6 +23,7 @@ from ..schemas import (
     AdminStakePayoutResponse,
     AutoSettlementResponse,
     DailyProductFactorOverrideResponse,
+    DailyProductVoidResponse,
     DailyProductLegView,
     DailyProductsResponse,
     DailyProductView,
@@ -816,6 +817,36 @@ class PicksService:
             .where(DailyProduct.id == daily_product.id)
         )
         return DailyProductFactorOverrideResponse(success=True, product=self._to_daily_product_view(refreshed or daily_product))
+
+    def void_daily_product(self, db: Session, *, product_id: str) -> DailyProductVoidResponse:
+        daily_product = db.scalar(
+            select(DailyProduct)
+            .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick))
+            .where(DailyProduct.id == product_id)
+        )
+        if not daily_product:
+            raise ValueError('Daily product not found')
+
+        if daily_product.outcome != SettlementOutcome.VOID.value or daily_product.status != 'SETTLED':
+            daily_product.status = 'SETTLED'
+            daily_product.outcome = SettlementOutcome.VOID.value
+            daily_product.manual_factor_override = None
+            daily_product.settled_factor = 1.0
+            daily_product.settled_at = datetime.utcnow()
+            db.add(daily_product)
+            db.commit()
+
+            self._recalculate_product_stakes(db, daily_product=daily_product)
+            self._apply_daily_product_to_stakes(db, daily_product=daily_product)
+            db.commit()
+
+        db.refresh(daily_product)
+        refreshed = db.scalar(
+            select(DailyProduct)
+            .options(joinedload(DailyProduct.legs).joinedload(DailyProductLeg.pick))
+            .where(DailyProduct.id == daily_product.id)
+        )
+        return DailyProductVoidResponse(success=True, product=self._to_daily_product_view(refreshed or daily_product))
 
     def withdraw_stake(self, db: Session, *, stake_id: str, user_id: str) -> StakeWithdrawResponse:
         position = db.scalar(
@@ -1859,6 +1890,8 @@ class PicksService:
         )
         if not daily_product or not daily_product.legs:
             return None
+        if daily_product.outcome == SettlementOutcome.VOID.value and daily_product.status == 'SETTLED':
+            return daily_product
 
         outcomes: list[SettlementOutcome] = []
         for leg in daily_product.legs:

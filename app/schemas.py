@@ -306,6 +306,11 @@ class DailyProductFactorOverrideResponse(BaseModel):
     product: DailyProductView
 
 
+class DailyProductVoidResponse(BaseModel):
+    success: bool
+    product: DailyProductView
+
+
 class AdminStakeListResponse(BaseModel):
     as_of_date: date
     stake_asset: StakeAsset

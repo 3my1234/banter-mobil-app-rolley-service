@@ -13,6 +13,7 @@ from .schemas import (
     AutoSettlementResponse,
     DailyProductFactorOverrideRequest,
     DailyProductFactorOverrideResponse,
+    DailyProductVoidResponse,
     DailyProductsResponse,
     MovementWalletStatusResponse,
     PerformanceStatsResponse,
@@ -292,6 +293,20 @@ def override_daily_product_factor(
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
     try:
         return service.override_daily_product_factor(db, product_id=product_id, factor=payload.factor)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.post(f'{settings.api_prefix}/admin/products/{{product_id}}/void', response_model=DailyProductVoidResponse)
+def void_daily_product(
+    product_id: str,
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    try:
+        return service.void_daily_product(db, product_id=product_id)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 

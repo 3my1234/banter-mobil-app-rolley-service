@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     api_football_host: str = 'v3.football.api-sports.io'
     football_data_enabled: bool = False
     football_data_key: str | None = None
+    odds_api_enabled: bool = True
+    odds_api_key: str | None = None
+    odds_api_base_url: str = 'https://api.odds-api.io/v3'
+    odds_api_bookmakers: str = 'Bet365,Pinnacle,Unibet'
+    odds_api_match_window_hours: int = 8
+    odds_sanity_filter_enabled: bool = True
+    odds_sanity_double_chance_max: float = 1.35
+    odds_sanity_total_goals_over_05_max: float = 1.30
+    odds_sanity_total_goals_over_15_max: float = 1.55
+    odds_sanity_handicap_max: float = 1.50
 
     admin_refresh_key: str | None = None
 

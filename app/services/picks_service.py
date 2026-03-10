@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..config import get_settings
 from ..models import DailyProduct, DailyProductLeg, MatchHistory, PickRecord, PickSettlement, StakeDailyResult, StakePosition
+from ..providers.odds_provider import OddsApiProvider, PickOddsQuote
 from ..providers.gemini_client import GeminiContextClient
 from ..providers.sports_provider import SportsDataProvider
 from ..reasoning import Decision, ProbabilityEngine, RolleyDecisionEngine
@@ -92,6 +93,7 @@ class PicksService:
     def __init__(self) -> None:
         self._settings = get_settings()
         self._sports = SportsDataProvider()
+        self._odds = OddsApiProvider()
         self._gemini = GeminiContextClient()
         self._probability = ProbabilityEngine()
         self._decision = RolleyDecisionEngine()
@@ -1571,9 +1573,10 @@ class PicksService:
                 db.flush()
             return None
 
-        product_picks = self._select_daily_product_picks(picks=picks, sport=sport)
+        product_picks, market_quotes = self._select_daily_product_picks(picks=picks, sport=sport)
         if not product_picks:
             product_picks = picks[:1]
+            market_quotes = {}
 
         if existing is None:
             existing = DailyProduct(id=str(uuid4()), product_date=target_date, sport=sport.value)
@@ -1602,7 +1605,8 @@ class PicksService:
                     implied_odds=pick.implied_odds,
                 )
             )
-            combined_odds *= Decimal(str(max(1.0, pick.implied_odds)))
+            quote = market_quotes.get(pick.id)
+            combined_odds *= Decimal(str(max(1.0, quote.price if quote else pick.implied_odds)))
             total_confidence += Decimal(str(max(0.0, pick.confidence)))
             rationale_bits.append(f'{pick.market} {pick.selection}')
 
@@ -1627,9 +1631,14 @@ class PicksService:
         db.refresh(existing)
         return existing
 
-    def _select_daily_product_picks(self, *, picks: list[PickRecord], sport: Sport) -> list[PickRecord]:
+    def _select_daily_product_picks(
+        self,
+        *,
+        picks: list[PickRecord],
+        sport: Sport,
+    ) -> tuple[list[PickRecord], dict[str, PickOddsQuote]]:
         if not picks:
-            return []
+            return [], {}
 
         min_legs = max(1, int(self._settings.daily_product_min_legs))
         max_legs = max(min_legs, int(self._settings.daily_product_max_legs))
@@ -1640,30 +1649,44 @@ class PicksService:
             key=lambda item: (bool(item.is_primary), item.confidence, item.implied_odds, item.created_at),
             reverse=True,
         )
+        market_quotes = self._bookmaker_quotes_for_picks(picks=ordered, sport=sport)
 
         best_rank: tuple[float, float] | None = None
         best_picks: list[PickRecord] | None = None
         for size in range(min_legs, max_legs + 1):
             for combo in combinations(ordered, size):
                 combo_list = list(combo)
-                if not self._daily_product_combo_is_valid(combo_list, sport=sport):
+                if not self._daily_product_combo_is_valid(combo_list, sport=sport, market_quotes=market_quotes):
                     continue
-                score = self._score_daily_product_combo(combo_list, sport=sport)
+                score = self._score_daily_product_combo(combo_list, sport=sport, market_quotes=market_quotes)
                 rank = (score[0], -float(size))
                 if best_rank is None or rank > best_rank:
                     best_rank = rank
                     best_picks = combo_list
 
         if best_picks:
-            return best_picks
-        return ordered[:1]
+            return best_picks, market_quotes
+        safe_singles = [
+            pick for pick in ordered
+            if self._pick_passes_odds_sanity(pick, market_quotes=market_quotes)
+        ]
+        fallback = safe_singles[:1] or ordered[:1]
+        return fallback, market_quotes
 
-    def _daily_product_combo_is_valid(self, picks: list[PickRecord], *, sport: Sport) -> bool:
+    def _daily_product_combo_is_valid(
+        self,
+        picks: list[PickRecord],
+        *,
+        sport: Sport,
+        market_quotes: dict[str, PickOddsQuote],
+    ) -> bool:
         if not picks:
             return False
 
         unique_matches = {pick.external_match_id for pick in picks}
         if len(unique_matches) != len(picks):
+            return False
+        if any(not self._pick_passes_odds_sanity(pick, market_quotes=market_quotes) for pick in picks):
             return False
 
         if sport == Sport.SOCCER:
@@ -1680,12 +1703,18 @@ class PicksService:
 
         return True
 
-    def _score_daily_product_combo(self, picks: list[PickRecord], *, sport: Sport) -> tuple[float, float]:
+    def _score_daily_product_combo(
+        self,
+        picks: list[PickRecord],
+        *,
+        sport: Sport,
+        market_quotes: dict[str, PickOddsQuote],
+    ) -> tuple[float, float]:
         combined_odds = 1.0
         confidence_sum = 0.0
         market_counts: dict[str, int] = {}
         for pick in picks:
-            combined_odds *= max(1.0, float(pick.implied_odds))
+            combined_odds *= self._effective_pick_factor(pick, market_quotes=market_quotes)
             confidence_sum += max(0.0, float(pick.confidence))
             market = pick.market.upper()
             market_counts[market] = market_counts.get(market, 0) + 1
@@ -1733,6 +1762,64 @@ class PicksService:
 
         score = (avg_confidence * 0.7) + (odds_score * 0.3) + safe_bonus + primary_bonus + size_bonus - diversity_penalty
         return score, combined_odds
+
+    def _bookmaker_quotes_for_picks(
+        self,
+        *,
+        picks: list[PickRecord],
+        sport: Sport,
+    ) -> dict[str, PickOddsQuote]:
+        if not self._odds.enabled:
+            return {}
+        quotes: dict[str, PickOddsQuote] = {}
+        for pick in picks:
+            quote = self._odds.quote_for_pick(
+                sport=sport,
+                home_team=pick.home_team,
+                away_team=pick.away_team,
+                kick_off_utc=pick.kick_off_utc,
+                market=pick.market,
+                selection=pick.selection,
+            )
+            if quote:
+                quotes[pick.id] = quote
+        return quotes
+
+    def _pick_passes_odds_sanity(
+        self,
+        pick: PickRecord,
+        *,
+        market_quotes: dict[str, PickOddsQuote],
+    ) -> bool:
+        quote = market_quotes.get(pick.id)
+        if not quote:
+            return True
+        threshold = self._market_odds_sanity_max(pick)
+        return quote.price <= threshold
+
+    def _market_odds_sanity_max(self, pick: PickRecord) -> float:
+        market = (pick.market or '').upper()
+        selection = (pick.selection or '').upper()
+        if market == 'DOUBLE_CHANCE':
+            return float(self._settings.odds_sanity_double_chance_max)
+        if market == 'TOTAL_GOALS' and 'OVER 0.5' in selection:
+            return float(self._settings.odds_sanity_total_goals_over_05_max)
+        if market == 'TOTAL_GOALS' and 'OVER 1.5' in selection:
+            return float(self._settings.odds_sanity_total_goals_over_15_max)
+        if market in {'HANDICAP', 'ALT_SPREAD'}:
+            return float(self._settings.odds_sanity_handicap_max)
+        return float(self._settings.daily_product_target_multiplier_max)
+
+    def _effective_pick_factor(
+        self,
+        pick: PickRecord,
+        *,
+        market_quotes: dict[str, PickOddsQuote],
+    ) -> float:
+        quote = market_quotes.get(pick.id)
+        if quote:
+            return max(1.0, float(quote.price))
+        return max(1.0, float(pick.implied_odds))
 
     def _basketball_selection_side(self, selection: str) -> str:
         upper = (selection or '').upper()

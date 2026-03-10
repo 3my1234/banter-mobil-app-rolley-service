@@ -62,8 +62,12 @@ class OddsApiProvider:
         if not event:
             return None
 
+        event_odds = self._fetch_event_odds(event_id=str(event.get('id') or ''))
+        if not event_odds:
+            return None
+
         prices = self._extract_candidate_prices(
-            bookmakers_payload=event.get('bookmakers') or {},
+            bookmakers_payload=event_odds.get('bookmakers') or {},
             market=market,
             selection=selection,
         )
@@ -91,8 +95,9 @@ class OddsApiProvider:
         params: dict[str, Any] = {
             'apiKey': self._api_key,
             'sport': query_sport,
-            'startAt': starts_at.replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
-            'endAt': ends_at.replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
+            'from': starts_at.replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
+            'to': ends_at.replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
+            'status': 'pending,live',
         }
         if self._bookmakers:
             params['bookmaker'] = self._bookmakers[0]
@@ -125,6 +130,26 @@ class OddsApiProvider:
                 best_match = (score, item)
 
         return best_match[1] if best_match else None
+
+    def _fetch_event_odds(self, *, event_id: str) -> dict[str, Any] | None:
+        if not event_id:
+            return None
+        params: dict[str, Any] = {
+            'apiKey': self._api_key,
+            'eventId': event_id,
+        }
+        if self._bookmakers:
+            params['bookmakers'] = ','.join(self._bookmakers)
+        try:
+            with httpx.Client(timeout=15) as client:
+                response = client.get(f'{self._base_url}/odds', params=params)
+                response.raise_for_status()
+                payload = response.json()
+        except Exception:
+            return None
+        if isinstance(payload, dict):
+            return payload
+        return None
 
     def _extract_candidate_prices(
         self,

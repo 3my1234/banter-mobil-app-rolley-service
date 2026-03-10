@@ -1575,8 +1575,15 @@ class PicksService:
 
         product_picks, market_quotes = self._select_daily_product_picks(picks=picks, sport=sport)
         if not product_picks:
-            product_picks = picks[:1]
-            market_quotes = {}
+            for pick in picks:
+                if pick.daily_product_id:
+                    pick.daily_product_id = None
+                    db.add(pick)
+            if existing:
+                db.execute(delete(DailyProductLeg).where(DailyProductLeg.daily_product_id == existing.id))
+                db.delete(existing)
+                db.flush()
+            return None
 
         if existing is None:
             existing = DailyProduct(id=str(uuid4()), product_date=target_date, sport=sport.value)

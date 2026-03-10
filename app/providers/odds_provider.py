@@ -176,41 +176,78 @@ class OddsApiProvider:
     def _price_from_market_entry(self, *, entry: dict[str, Any], market: str, selection: str) -> float | None:
         market_upper = market.upper()
         selection_upper = selection.upper().strip()
+        odds_rows = entry.get('odds')
         if market_upper == 'TOTAL_GOALS':
             side, line = self._parse_total_goals_selection(selection_upper)
             if side is None or line is None:
                 return None
-            for key, value in entry.items():
-                if self._normalize(str(key)) != self._normalize(side):
-                    continue
-                price = self._extract_price_for_line(value, target_line=line)
-                if price is not None:
-                    return price
-            return None
+            return self._extract_total_goals_price(odds_rows=odds_rows, side=side, target_line=line)
 
         if market_upper == 'DOUBLE_CHANCE':
-            for key, value in entry.items():
-                if self._normalize(str(key)) != self._normalize(selection_upper):
-                    continue
-                price = self._as_price(value)
-                if price is not None:
-                    return price
-            return None
+            return self._extract_double_chance_price(odds_rows=odds_rows, selection=selection_upper)
 
         if market_upper in {'HANDICAP', 'ALT_SPREAD'}:
             side, line = self._parse_handicap_selection(selection_upper)
             if side is None or line is None:
                 return None
-            side_key = 'home' if side == 'HOME' else 'away'
-            for key, value in entry.items():
-                if self._normalize(str(key)) != side_key:
-                    continue
-                price = self._extract_price_for_line(value, target_line=line)
-                if price is not None:
-                    return price
-            return None
+            return self._extract_spread_price(odds_rows=odds_rows, side=side, target_line=line)
 
         return None
+
+    def _extract_total_goals_price(self, *, odds_rows: Any, side: str, target_line: float) -> float | None:
+        if not isinstance(odds_rows, list):
+            return None
+        side_key = side.lower()
+        best: tuple[float, float] | None = None
+        for row in odds_rows:
+            if not isinstance(row, dict):
+                continue
+            line = self._extract_line_from_row(row)
+            if line is None:
+                continue
+            price = self._as_price(row.get(side_key))
+            if price is None:
+                continue
+            distance = abs(line - target_line)
+            if best is None or distance < best[0]:
+                best = (distance, price)
+        return best[1] if best else None
+
+    def _extract_double_chance_price(self, *, odds_rows: Any, selection: str) -> float | None:
+        if not isinstance(odds_rows, list):
+            return None
+        target = selection.upper()
+        for row in odds_rows:
+            if not isinstance(row, dict):
+                continue
+            label = str(row.get('label') or '').strip()
+            mapped = self._map_double_chance_label(label)
+            if mapped != target:
+                continue
+            for key in ('under', 'price', 'odds', 'value'):
+                price = self._as_price(row.get(key))
+                if price is not None:
+                    return price
+        return None
+
+    def _extract_spread_price(self, *, odds_rows: Any, side: str, target_line: float) -> float | None:
+        if not isinstance(odds_rows, list):
+            return None
+        side_key = 'home' if side == 'HOME' else 'away'
+        best: tuple[float, float] | None = None
+        for row in odds_rows:
+            if not isinstance(row, dict):
+                continue
+            line = self._extract_line_from_row(row)
+            if line is None:
+                continue
+            price = self._as_price(row.get(side_key))
+            if price is None:
+                continue
+            distance = abs(line - target_line)
+            if best is None or distance < best[0]:
+                best = (distance, price)
+        return best[1] if best else None
 
     def _extract_price_for_line(self, payload: Any, *, target_line: float) -> float | None:
         line_key = f'{target_line:g}'
@@ -264,6 +301,29 @@ class OddsApiProvider:
         if upper.startswith('AWAY '):
             return 'AWAY', abs(self._extract_last_number(upper) or 0.0)
         return None, None
+
+    def _extract_line_from_row(self, row: dict[str, Any]) -> float | None:
+        for key in ('hdp', 'line', 'points'):
+            value = row.get(key)
+            if value is None:
+                continue
+            try:
+                return abs(float(value))
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _map_double_chance_label(self, label: str) -> str | None:
+        normalized = self._normalize(label)
+        if 'draw' not in normalized:
+            if ' or ' in normalized:
+                return '12'
+            return None
+        if 'or draw' in normalized:
+            return '1X'
+        if 'draw or' in normalized:
+            return 'X2'
+        return None
 
     def _extract_last_number(self, value: str) -> float | None:
         digits = ''.join(ch if (ch.isdigit() or ch in '.-') else ' ' for ch in value)

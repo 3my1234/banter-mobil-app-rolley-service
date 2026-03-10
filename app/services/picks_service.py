@@ -1677,6 +1677,8 @@ class PicksService:
             pick for pick in ordered
             if self._pick_passes_odds_sanity(pick, market_quotes=market_quotes)
         ]
+        if self._odds.enabled and market_quotes and not safe_singles:
+            return [], market_quotes
         fallback = safe_singles[:1] or ordered[:1]
         return fallback, market_quotes
 

@@ -265,7 +265,8 @@ class PicksService:
                 )
 
             if staged:
-                staged = self._filter_staged_predictions(staged=staged)
+                min_confidence = self._min_confidence_for_sport(current_sport)
+                staged = self._filter_staged_predictions(staged=staged, min_confidence=min_confidence)
 
             if staged:
                 primary_ids = self._select_primary_ids(staged=staged)
@@ -1488,13 +1489,25 @@ class PicksService:
         cutoff = now_utc + timedelta(minutes=buffer_minutes)
         return kick_off_utc <= cutoff
 
-    def _filter_staged_predictions(self, *, staged: list[StagedPrediction]) -> list[StagedPrediction]:
-        min_confidence = max(0.0, min(0.99, float(self._settings.prediction_min_confidence)))
+    def _filter_staged_predictions(
+        self,
+        *,
+        staged: list[StagedPrediction],
+        min_confidence: float,
+    ) -> list[StagedPrediction]:
+        min_confidence = max(0.0, min(0.99, float(min_confidence)))
         max_picks = max(1, int(self._settings.prediction_max_picks_per_sport))
 
         filtered = [item for item in staged if item.record.confidence >= min_confidence]
         filtered.sort(key=lambda item: (item.record.confidence, item.data_completeness), reverse=True)
         return filtered[:max_picks]
+
+    def _min_confidence_for_sport(self, sport: Sport) -> float:
+        if sport == Sport.SOCCER and self._settings.prediction_min_confidence_soccer is not None:
+            return self._settings.prediction_min_confidence_soccer
+        if sport == Sport.BASKETBALL and self._settings.prediction_min_confidence_basketball is not None:
+            return self._settings.prediction_min_confidence_basketball
+        return self._settings.prediction_min_confidence
 
     def _select_primary_ids(self, *, staged: list[StagedPrediction]) -> set[str]:
         min_completeness = max(0.0, min(1.0, float(self._settings.primary_min_completeness)))

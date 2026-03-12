@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     primary_pick_count: int = 1
     primary_min_completeness: float = 0.65
     prediction_min_confidence: float = 0.90
+    prediction_min_confidence_soccer: float | None = None
+    prediction_min_confidence_basketball: float | None = None
     prediction_max_picks_per_sport: int = 3
     prediction_exclude_started_matches: bool = True
     prediction_start_buffer_minutes: int = 0

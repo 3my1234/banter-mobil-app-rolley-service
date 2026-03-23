@@ -12,6 +12,7 @@ from .schemas import (
     AdminStakePayoutResponse,
     AutoSettlementResponse,
     GenerationDiagnosticsResponse,
+    PredictionCreatorCreateRequest,
     DailyProductFactorOverrideRequest,
     DailyProductFactorOverrideResponse,
     DailyProductVoidResponse,
@@ -21,6 +22,8 @@ from .schemas import (
     PickHistoryResponse,
     PickSettlementPayload,
     RefreshResponse,
+    RolloverProgramCreateRequest,
+    RolloverProgramsResponse,
     RolloverSummaryResponse,
     Sport,
     StakeAsset,
@@ -332,6 +335,42 @@ def get_performance_stats(
     db: Session = Depends(get_db),
 ):
     return service.get_performance_stats(db, days=days, model_version=model_version)
+
+
+@app.get(f'{settings.api_prefix}/programs', response_model=RolloverProgramsResponse)
+def list_programs(
+    sport: Sport | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    return service.list_programs(db, sport=sport, only_public=True)
+
+
+@app.post(f'{settings.api_prefix}/admin/creators')
+def create_creator(
+    payload: PredictionCreatorCreateRequest = Body(...),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    try:
+        return {'success': True, 'creator': service.create_creator(db, payload)}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post(f'{settings.api_prefix}/admin/programs')
+def create_program(
+    payload: RolloverProgramCreateRequest = Body(...),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    try:
+        return {'success': True, 'program': service.create_program(db, payload)}
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.post(f'{settings.api_prefix}/stakes/create')

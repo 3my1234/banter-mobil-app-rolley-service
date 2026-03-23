@@ -17,6 +17,46 @@ class Base(DeclarativeBase):
     pass
 
 
+class PredictionCreator(Base):
+    __tablename__ = 'rolley_creators'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    handle: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    bio: Mapped[str | None] = mapped_column(Text, default=None)
+    status: Mapped[str] = mapped_column(String(20), default='ACTIVE', index=True)
+    is_house: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    programs: Mapped[list['RolloverProgram']] = relationship(
+        back_populates='creator',
+        cascade='all, delete-orphan',
+    )
+
+
+class RolloverProgram(Base):
+    __tablename__ = 'rolley_programs'
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    creator_id: Mapped[str] = mapped_column(String(36), ForeignKey('rolley_creators.id', ondelete='CASCADE'), index=True)
+    slug: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    description: Mapped[str | None] = mapped_column(Text, default=None)
+    sport: Mapped[str] = mapped_column(String(20), index=True)
+    stake_asset: Mapped[str] = mapped_column(String(16), default='USD')
+    lock_days: Mapped[int] = mapped_column(Integer, default=5)
+    creator_fee_rate: Mapped[float] = mapped_column(Float, default=0.2)
+    banter_fee_share_rate: Mapped[float] = mapped_column(Float, default=0.1)
+    status: Mapped[str] = mapped_column(String(20), default='ACTIVE', index=True)
+    visibility: Mapped[str] = mapped_column(String(20), default='PUBLIC', index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    creator: Mapped['PredictionCreator'] = relationship(back_populates='programs')
+    stakes: Mapped[list['StakePosition']] = relationship(back_populates='program')
+
+
 class PickRecord(Base):
     __tablename__ = 'rolley_picks'
 
@@ -141,6 +181,7 @@ class StakePosition(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(120), index=True)
+    program_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('rolley_programs.id', ondelete='SET NULL'), index=True, default=None)
     external_reference: Mapped[str | None] = mapped_column(String(120), unique=True, default=None, index=True)
     sport: Mapped[str] = mapped_column(String(20), index=True)
     stake_asset: Mapped[str] = mapped_column(String(16), default='ROL', index=True)
@@ -155,8 +196,12 @@ class StakePosition(Base):
 
     status: Mapped[str] = mapped_column(String(20), default='ACTIVE', index=True)  # ACTIVE/LOST/MATURED/WITHDRAWN
     total_factor: Mapped[float] = mapped_column(Float, default=1.0)
+    creator_fee_rate: Mapped[float] = mapped_column(Float, default=0.10)
+    banter_fee_share_rate: Mapped[float] = mapped_column(Float, default=1.0)
 
     gross_profit_raw: Mapped[str] = mapped_column(String(40), default='0')
+    creator_fee_raw: Mapped[str] = mapped_column(String(40), default='0')
+    creator_net_fee_raw: Mapped[str] = mapped_column(String(40), default='0')
     platform_fee_raw: Mapped[str] = mapped_column(String(40), default='0')
     net_payout_raw: Mapped[str] = mapped_column(String(40), default='0')
 
@@ -169,6 +214,7 @@ class StakePosition(Base):
         back_populates='stake',
         cascade='all, delete-orphan',
     )
+    program: Mapped['RolloverProgram | None'] = relationship(back_populates='stakes')
 
 
 class StakeDailyResult(Base):

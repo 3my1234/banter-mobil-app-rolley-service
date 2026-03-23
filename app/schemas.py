@@ -28,6 +28,23 @@ class StakeAsset(str, Enum):
     ROL = 'ROL'
 
 
+class CreatorStatus(str, Enum):
+    ACTIVE = 'ACTIVE'
+    PAUSED = 'PAUSED'
+    DISABLED = 'DISABLED'
+
+
+class ProgramStatus(str, Enum):
+    ACTIVE = 'ACTIVE'
+    PAUSED = 'PAUSED'
+    CLOSED = 'CLOSED'
+
+
+class ProgramVisibility(str, Enum):
+    PUBLIC = 'PUBLIC'
+    PRIVATE = 'PRIVATE'
+
+
 class MatchContext(BaseModel):
     urgency_score: float = Field(ge=0, le=10)
     volatility_index: float = Field(ge=0, le=10)
@@ -252,10 +269,66 @@ class PerformanceStatsResponse(BaseModel):
 class StakeCreateRequest(BaseModel):
     user_id: str = Field(min_length=2, max_length=120)
     external_reference: str | None = Field(default=None, min_length=2, max_length=120)
+    program_id: str | None = Field(default=None, min_length=2, max_length=120)
     sport: Sport
     stake_asset: StakeAsset
     amount: float = Field(gt=0)
     lock_days: int = Field(ge=5, le=30)
+
+
+class PredictionCreatorView(BaseModel):
+    id: str
+    handle: str
+    display_name: str
+    bio: str | None = None
+    status: CreatorStatus
+    is_house: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+
+class RolloverProgramView(BaseModel):
+    id: str
+    creator_id: str
+    slug: str
+    title: str
+    description: str | None = None
+    sport: Sport
+    stake_asset: StakeAsset
+    lock_days: int
+    creator_fee_rate: float
+    banter_fee_share_rate: float
+    status: ProgramStatus
+    visibility: ProgramVisibility
+    created_at: datetime
+    updated_at: datetime
+    creator: PredictionCreatorView
+
+
+class RolloverProgramsResponse(BaseModel):
+    programs: list[RolloverProgramView] = Field(default_factory=list)
+
+
+class PredictionCreatorCreateRequest(BaseModel):
+    handle: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(min_length=2, max_length=120)
+    bio: str | None = Field(default=None, max_length=1000)
+    status: CreatorStatus = CreatorStatus.ACTIVE
+    is_house: bool = False
+
+
+class RolloverProgramCreateRequest(BaseModel):
+    creator_id: str = Field(min_length=2, max_length=120)
+    slug: str = Field(min_length=2, max_length=80)
+    title: str = Field(min_length=2, max_length=160)
+    description: str | None = Field(default=None, max_length=2000)
+    sport: Sport
+    stake_asset: StakeAsset = StakeAsset.USD
+    lock_days: int = Field(ge=5, le=30)
+    creator_fee_rate: float = Field(ge=0, le=1)
+    banter_fee_share_rate: float = Field(ge=0, le=1)
+    status: ProgramStatus = ProgramStatus.ACTIVE
+    visibility: ProgramVisibility = ProgramVisibility.PUBLIC
 
 
 class StakeDailyResultView(BaseModel):
@@ -273,6 +346,11 @@ class StakeDailyResultView(BaseModel):
 class StakePositionView(BaseModel):
     id: str
     user_id: str
+    program_id: str | None = None
+    program_slug: str | None = None
+    program_title: str | None = None
+    creator_id: str | None = None
+    creator_display_name: str | None = None
     sport: Sport
     stake_asset: StakeAsset
     principal_amount: float
@@ -285,6 +363,10 @@ class StakePositionView(BaseModel):
     status: StakeStatus
     total_factor: float
     gross_profit_amount: float
+    creator_fee_rate: float
+    banter_fee_share_rate: float
+    creator_fee_amount: float
+    creator_net_fee_amount: float
     platform_fee_amount: float
     net_payout_amount: float
     latest_pick_date: date | None = None

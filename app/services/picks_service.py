@@ -12,7 +12,17 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, joinedload
 
 from ..config import get_settings
-from ..models import DailyProduct, DailyProductLeg, MatchHistory, PickRecord, PickSettlement, StakeDailyResult, StakePosition
+from ..models import (
+    DailyProduct,
+    DailyProductLeg,
+    MatchHistory,
+    PickRecord,
+    PickSettlement,
+    PredictionCreator,
+    RolloverProgram,
+    StakeDailyResult,
+    StakePosition,
+)
 from ..providers.odds_provider import OddsApiProvider, PickOddsQuote
 from ..providers.gemini_client import GeminiContextClient
 from ..providers.sports_provider import SportsDataProvider
@@ -36,8 +46,13 @@ from ..schemas import (
     MovementWalletStatusResponse,
     PickSettlementPayload,
     PerformanceStatsResponse,
+    PredictionCreatorCreateRequest,
+    PredictionCreatorView,
     RefreshResponse,
     RolleyPick,
+    RolloverProgramCreateRequest,
+    RolloverProgramView,
+    RolloverProgramsResponse,
     RolloverSportSummaryView,
     RolloverSummaryResponse,
     SettlementOutcome,
@@ -58,7 +73,6 @@ ASSET_DECIMALS = {
     'USDC': 6,
     'ROL': 8,
 }
-TEN_PERCENT = Decimal('0.10')
 SAFE_SOCCER_PRIMARY_MARKETS = {'TOTAL_GOALS', 'DOUBLE_CHANCE'}
 logger = logging.getLogger(__name__)
 
@@ -274,6 +288,74 @@ class PicksService:
             low_confidence=low_confidence[:20],
             kept=kept_rows[:20],
         )
+
+    def create_creator(self, db: Session, payload: PredictionCreatorCreateRequest) -> PredictionCreatorView:
+        existing = db.scalar(select(PredictionCreator).where(PredictionCreator.handle == payload.handle))
+        if existing:
+            raise ValueError('Creator handle already exists')
+
+        row = PredictionCreator(
+            id=str(uuid4()),
+            handle=payload.handle.strip(),
+            display_name=payload.display_name.strip(),
+            bio=(payload.bio or '').strip() or None,
+            status=payload.status.value,
+            is_house=payload.is_house,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return self._to_creator_view(row)
+
+    def create_program(self, db: Session, payload: RolloverProgramCreateRequest) -> RolloverProgramView:
+        creator = db.scalar(select(PredictionCreator).where(PredictionCreator.id == payload.creator_id))
+        if not creator:
+            raise ValueError('Creator not found')
+        existing = db.scalar(select(RolloverProgram).where(RolloverProgram.slug == payload.slug))
+        if existing:
+            raise ValueError('Program slug already exists')
+
+        row = RolloverProgram(
+            id=str(uuid4()),
+            creator_id=creator.id,
+            slug=payload.slug.strip(),
+            title=payload.title.strip(),
+            description=(payload.description or '').strip() or None,
+            sport=payload.sport.value,
+            stake_asset=payload.stake_asset.value,
+            lock_days=payload.lock_days,
+            creator_fee_rate=payload.creator_fee_rate,
+            banter_fee_share_rate=payload.banter_fee_share_rate,
+            status=payload.status.value,
+            visibility=payload.visibility.value,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        hydrated = db.scalar(
+            select(RolloverProgram)
+            .options(joinedload(RolloverProgram.creator))
+            .where(RolloverProgram.id == row.id)
+        )
+        return self._to_program_view(hydrated or row)
+
+    def list_programs(
+        self,
+        db: Session,
+        *,
+        sport: Sport | None = None,
+        only_public: bool = True,
+    ) -> RolloverProgramsResponse:
+        query = select(RolloverProgram).options(joinedload(RolloverProgram.creator)).order_by(RolloverProgram.created_at.desc())
+        if sport:
+            query = query.where(RolloverProgram.sport == sport.value)
+        if only_public:
+            query = query.where(
+                RolloverProgram.visibility == 'PUBLIC',
+                RolloverProgram.status == 'ACTIVE',
+            )
+        rows = db.scalars(query).all()
+        return RolloverProgramsResponse(programs=[self._to_program_view(row) for row in rows])
 
     async def _refresh_daily_picks(
         self,
@@ -775,33 +857,65 @@ class PicksService:
     def create_stake(self, db: Session, payload: StakeCreateRequest) -> StakeCreateResponse:
         if payload.external_reference:
             existing = db.scalar(
-                select(StakePosition).where(StakePosition.external_reference == payload.external_reference)
+                select(StakePosition)
+                .options(joinedload(StakePosition.program).joinedload(RolloverProgram.creator))
+                .where(StakePosition.external_reference == payload.external_reference)
             )
             if existing:
                 return StakeCreateResponse(success=True, stake=self._to_stake_view(existing))
-        starts_on = self._stake_start_date(db, sport=payload.sport)
-        ends_on = starts_on + timedelta(days=payload.lock_days)
-        asset_decimals = self._asset_decimals(payload.stake_asset)
+        program: RolloverProgram | None = None
+        sport = payload.sport
+        stake_asset = payload.stake_asset
+        lock_days = payload.lock_days
+        creator_fee_rate = 0.10
+        banter_fee_share_rate = 1.0
+
+        if payload.program_id:
+            program = db.scalar(
+                select(RolloverProgram)
+                .options(joinedload(RolloverProgram.creator))
+                .where(RolloverProgram.id == payload.program_id)
+            )
+            if not program:
+                raise ValueError('Program not found')
+            if program.status != 'ACTIVE':
+                raise ValueError('Program is not active')
+            sport = Sport(program.sport)
+            stake_asset = StakeAsset(program.stake_asset)
+            lock_days = program.lock_days
+            creator_fee_rate = float(program.creator_fee_rate)
+            banter_fee_share_rate = float(program.banter_fee_share_rate)
+
+        starts_on = self._stake_start_date(db, sport=sport)
+        ends_on = starts_on + timedelta(days=lock_days)
+        asset_decimals = self._asset_decimals(stake_asset)
         principal_raw = asset_amount_to_raw(payload.amount, decimals=asset_decimals)
         position = StakePosition(
             id=str(uuid4()),
             user_id=payload.user_id,
+            program_id=program.id if program else None,
             external_reference=payload.external_reference,
-            sport=payload.sport.value,
-            stake_asset=payload.stake_asset.value,
+            sport=sport.value,
+            stake_asset=stake_asset.value,
             asset_decimals=asset_decimals,
             principal_raw=principal_raw,
             current_raw=principal_raw,
-            lock_days=payload.lock_days,
+            lock_days=lock_days,
             starts_on=starts_on,
             ends_on=ends_on,
             status=StakeStatus.ACTIVE.value,
             total_factor=1.0,
+            creator_fee_rate=creator_fee_rate,
+            banter_fee_share_rate=banter_fee_share_rate,
         )
         db.add(position)
         db.commit()
-        db.refresh(position)
-        return StakeCreateResponse(success=True, stake=self._to_stake_view(position))
+        hydrated = db.scalar(
+            select(StakePosition)
+            .options(joinedload(StakePosition.program).joinedload(RolloverProgram.creator))
+            .where(StakePosition.id == position.id)
+        )
+        return StakeCreateResponse(success=True, stake=self._to_stake_view(hydrated or position))
 
     def _stake_start_date(self, db: Session, *, sport: Sport) -> date:
         today = date.today()
@@ -819,7 +933,10 @@ class PicksService:
         rows = (
             db.execute(
                 select(StakePosition)
-                .options(joinedload(StakePosition.daily_results))
+                .options(
+                    joinedload(StakePosition.daily_results),
+                    joinedload(StakePosition.program).joinedload(RolloverProgram.creator),
+                )
                 .where(StakePosition.user_id == user_id)
                 .order_by(StakePosition.created_at.desc())
             )
@@ -1204,13 +1321,19 @@ class PicksService:
         current = Decimal(position.current_raw)
         principal = Decimal(position.principal_raw)
         profit = max(Decimal('0'), current - principal)
-        fee = (profit * TEN_PERCENT).quantize(Decimal('1'), rounding=ROUND_FLOOR)
-        net = max(Decimal('0'), current - fee)
+        creator_fee_rate = max(Decimal('0'), min(Decimal('1'), Decimal(str(position.creator_fee_rate or 0.10))))
+        banter_fee_share_rate = max(Decimal('0'), min(Decimal('1'), Decimal(str(position.banter_fee_share_rate or 1.0))))
+        creator_fee = (profit * creator_fee_rate).quantize(Decimal('1'), rounding=ROUND_FLOOR)
+        platform_fee = (creator_fee * banter_fee_share_rate).quantize(Decimal('1'), rounding=ROUND_FLOOR)
+        creator_net_fee = max(Decimal('0'), creator_fee - platform_fee)
+        net = max(Decimal('0'), current - creator_fee)
 
         position.status = StakeStatus.MATURED.value
         position.matured_at = datetime.utcnow()
         position.gross_profit_raw = str(profit)
-        position.platform_fee_raw = str(fee)
+        position.creator_fee_raw = str(creator_fee)
+        position.creator_net_fee_raw = str(creator_net_fee)
+        position.platform_fee_raw = str(platform_fee)
         position.net_payout_raw = str(net)
 
     def _apply_match_penalty(
@@ -2184,6 +2307,37 @@ class PicksService:
             created_at=row.created_at,
         )
 
+    def _to_creator_view(self, row: PredictionCreator) -> PredictionCreatorView:
+        return PredictionCreatorView(
+            id=row.id,
+            handle=row.handle,
+            display_name=row.display_name,
+            bio=row.bio,
+            status=row.status,
+            is_house=row.is_house,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    def _to_program_view(self, row: RolloverProgram) -> RolloverProgramView:
+        return RolloverProgramView(
+            id=row.id,
+            creator_id=row.creator_id,
+            slug=row.slug,
+            title=row.title,
+            description=row.description,
+            sport=Sport(row.sport),
+            stake_asset=StakeAsset(row.stake_asset),
+            lock_days=row.lock_days,
+            creator_fee_rate=row.creator_fee_rate,
+            banter_fee_share_rate=row.banter_fee_share_rate,
+            status=row.status,
+            visibility=row.visibility,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            creator=self._to_creator_view(row.creator),
+        )
+
     def _to_daily_product_view(self, row: DailyProduct) -> DailyProductView:
         return DailyProductView(
             id=row.id,
@@ -2236,9 +2390,16 @@ class PicksService:
         )
         latest_result = ordered_results[-1] if ordered_results else None
         decimals = row.asset_decimals or self._asset_decimals(row.stake_asset)
+        program = row.program
+        creator = program.creator if program else None
         return StakePositionView(
             id=row.id,
             user_id=row.user_id,
+            program_id=row.program_id,
+            program_slug=program.slug if program else None,
+            program_title=program.title if program else None,
+            creator_id=creator.id if creator else None,
+            creator_display_name=creator.display_name if creator else None,
             sport=Sport(row.sport),
             stake_asset=StakeAsset(row.stake_asset),
             principal_amount=raw_to_asset_amount(row.principal_raw, decimals=decimals),
@@ -2251,6 +2412,10 @@ class PicksService:
             status=StakeStatus(row.status),
             total_factor=row.total_factor,
             gross_profit_amount=raw_to_asset_amount(row.gross_profit_raw, decimals=decimals),
+            creator_fee_rate=row.creator_fee_rate,
+            banter_fee_share_rate=row.banter_fee_share_rate,
+            creator_fee_amount=raw_to_asset_amount(row.creator_fee_raw, decimals=decimals),
+            creator_net_fee_amount=raw_to_asset_amount(row.creator_net_fee_raw, decimals=decimals),
             platform_fee_amount=raw_to_asset_amount(row.platform_fee_raw, decimals=decimals),
             net_payout_amount=raw_to_asset_amount(row.net_payout_raw, decimals=decimals),
             latest_pick_date=latest_result.pick_date if latest_result else None,

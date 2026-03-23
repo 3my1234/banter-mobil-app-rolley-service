@@ -41,7 +41,7 @@ class SportsDataProvider:
             return self._stub_matches(sport=sport, target_date=target_date)
 
         if self._provider == 'ESPN':
-            matches = self._fetch_espn_matches(sport=sport, target_date=target_date, db=db)
+            matches, _ = self._fetch_espn_matches_with_diagnostics(sport=sport, target_date=target_date, db=db)
             if matches:
                 return matches
 
@@ -49,27 +49,90 @@ class SportsDataProvider:
             return self._stub_matches(sport=sport, target_date=target_date)
         return []
 
+    def fetch_matches_diagnostics(
+        self,
+        *,
+        sport: Sport,
+        target_date: datetime,
+        db: Session | None = None,
+    ) -> tuple[list[MatchCandidate], list[dict[str, Any]]]:
+        if self._provider == 'STUB':
+            matches = self._stub_matches(sport=sport, target_date=target_date)
+            return matches, [
+                {
+                    'provider': 'STUB',
+                    'competition': 'stub',
+                    'event_count': len(matches),
+                    'parsed_count': len(matches),
+                    'error': None,
+                }
+            ]
+
+        if self._provider == 'ESPN':
+            matches, diagnostics = self._fetch_espn_matches_with_diagnostics(
+                sport=sport,
+                target_date=target_date,
+                db=db,
+            )
+            if matches or not self._settings.sports_fallback_to_stub:
+                return matches, diagnostics
+
+        matches = self._stub_matches(sport=sport, target_date=target_date)
+        return matches, [
+            {
+                'provider': 'STUB',
+                'competition': 'stub',
+                'event_count': len(matches),
+                'parsed_count': len(matches),
+                'error': 'fallback_to_stub',
+            }
+        ]
+
     def _fetch_espn_matches(self, *, sport: Sport, target_date: datetime, db: Session | None = None) -> list[MatchCandidate]:
+        matches, _ = self._fetch_espn_matches_with_diagnostics(sport=sport, target_date=target_date, db=db)
+        return matches
+
+    def _fetch_espn_matches_with_diagnostics(
+        self,
+        *,
+        sport: Sport,
+        target_date: datetime,
+        db: Session | None = None,
+    ) -> tuple[list[MatchCandidate], list[dict[str, Any]]]:
         date_token = target_date.strftime('%Y%m%d')
         competitions = self._get_competitions(sport)
         if not competitions:
-            return []
+            return [], []
 
         matches: list[MatchCandidate] = []
+        diagnostics: list[dict[str, Any]] = []
         for competition in competitions:
             standings = self._get_standings(sport=sport, competition=competition)
             url = self._espn_url(sport=sport, competition=competition, date_token=date_token)
+            events: list[dict[str, Any]] = []
+            error_message: str | None = None
             try:
                 with httpx.Client(timeout=15) as client:
                     response = client.get(url)
                     response.raise_for_status()
                 payload = response.json()
-            except Exception:
+                events = payload.get('events') or []
+            except Exception as error:
+                error_message = str(error)
+                diagnostics.append(
+                    {
+                        'provider': 'ESPN',
+                        'competition': competition,
+                        'event_count': 0,
+                        'parsed_count': 0,
+                        'error': error_message,
+                    }
+                )
                 continue
 
-            events = payload.get('events') or []
             if db is not None:
                 self._upsert_completed_results(db=db, sport=sport, events=events)
+            parsed_count = 0
             for item in events:
                 parsed = self._parse_espn_event(
                     item=item,
@@ -81,13 +144,24 @@ class SportsDataProvider:
                 )
                 if parsed:
                     matches.append(parsed)
+                    parsed_count += 1
+
+            diagnostics.append(
+                {
+                    'provider': 'ESPN',
+                    'competition': competition,
+                    'event_count': len(events),
+                    'parsed_count': parsed_count,
+                    'error': error_message,
+                }
+            )
 
         # Deduplicate by external match id.
         unique: dict[str, MatchCandidate] = {}
         for match in matches:
             unique[match.external_match_id] = match
         ordered = sorted(unique.values(), key=lambda m: m.kick_off_utc)
-        return ordered
+        return ordered, diagnostics
 
     def _get_competitions(self, sport: Sport) -> list[str]:
         if sport == Sport.SOCCER:

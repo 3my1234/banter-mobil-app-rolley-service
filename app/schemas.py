@@ -186,6 +186,44 @@ class RefreshResponse(BaseModel):
     generated: int
 
 
+class GenerationCompetitionDiagnostic(BaseModel):
+    provider: str
+    competition: str
+    event_count: int
+    parsed_count: int
+    error: str | None = None
+
+
+class GenerationCandidateDiagnostic(BaseModel):
+    external_match_id: str
+    competition_code: str | None = None
+    league: str
+    home_team: str
+    away_team: str
+    kick_off_utc: datetime
+    confidence: float
+    data_completeness: float
+    reason: str
+
+
+class GenerationDiagnosticsResponse(BaseModel):
+    date: date
+    sport: Sport
+    provider: str
+    configured_competitions: list[str] = Field(default_factory=list)
+    min_confidence: float
+    fetched_matches: int
+    staged_matches: int
+    kept_matches: int
+    primary_matches: int
+    skipped_started_matches: int
+    low_confidence_matches: int
+    competitions: list[GenerationCompetitionDiagnostic] = Field(default_factory=list)
+    skipped_started: list[GenerationCandidateDiagnostic] = Field(default_factory=list)
+    low_confidence: list[GenerationCandidateDiagnostic] = Field(default_factory=list)
+    kept: list[GenerationCandidateDiagnostic] = Field(default_factory=list)
+
+
 class AutoSettlementResponse(BaseModel):
     success: bool
     date: date

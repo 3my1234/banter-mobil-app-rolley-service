@@ -22,6 +22,9 @@ from ..schemas import (
     AdminStakeListResponse,
     AdminStakePayoutResponse,
     AutoSettlementResponse,
+    GenerationCandidateDiagnostic,
+    GenerationCompetitionDiagnostic,
+    GenerationDiagnosticsResponse,
     DailyProductFactorOverrideResponse,
     DailyProductVoidResponse,
     DailyProductLegView,
@@ -113,6 +116,43 @@ class PicksService:
             total += Decimal(str(getattr(row, attr)))
         return raw_to_asset_amount(str(total), decimals=decimals)
 
+    def _to_generation_candidate(
+        self,
+        *,
+        match: MatchCandidate,
+        confidence: float,
+        reason: str,
+    ) -> GenerationCandidateDiagnostic:
+        return GenerationCandidateDiagnostic(
+            external_match_id=match.external_match_id,
+            competition_code=match.competition_code,
+            league=match.league,
+            home_team=match.home_team,
+            away_team=match.away_team,
+            kick_off_utc=match.kick_off_utc,
+            confidence=round(confidence, 4),
+            data_completeness=round(match.data_completeness, 4),
+            reason=reason,
+        )
+
+    def _to_generation_candidate_from_staged(
+        self,
+        *,
+        item: StagedPrediction,
+        reason: str,
+    ) -> GenerationCandidateDiagnostic:
+        return GenerationCandidateDiagnostic(
+            external_match_id=item.record.external_match_id,
+            competition_code=item.competition_code,
+            league=item.record.league,
+            home_team=item.record.home_team,
+            away_team=item.record.away_team,
+            kick_off_utc=item.record.kick_off_utc,
+            confidence=round(item.record.confidence, 4),
+            data_completeness=round(item.data_completeness, 4),
+            reason=reason,
+        )
+
     async def refresh_daily_picks(self, db: Session, *, target_date: date) -> RefreshResponse:
         return await self._refresh_daily_picks(db, target_date=target_date, sport=None, force_rebuild=False)
 
@@ -124,6 +164,116 @@ class PicksService:
         sport: Sport | None = None,
     ) -> RefreshResponse:
         return await self._refresh_daily_picks(db, target_date=target_date, sport=sport, force_rebuild=True)
+
+    async def get_generation_diagnostics(
+        self,
+        db: Session,
+        *,
+        target_date: date,
+        sport: Sport,
+    ) -> GenerationDiagnosticsResponse:
+        target_dt = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc)
+        matches, competition_rows = self._sports.fetch_matches_diagnostics(
+            sport=sport,
+            target_date=target_dt,
+            db=db,
+        )
+        now_utc = datetime.now(timezone.utc)
+        min_confidence = self._min_confidence_for_sport(sport)
+        staged: list[StagedPrediction] = []
+        skipped_started: list[GenerationCandidateDiagnostic] = []
+
+        for match in matches:
+            if self._should_skip_match_for_prediction(
+                target_date=target_date,
+                kick_off_utc=match.kick_off_utc,
+                now_utc=now_utc,
+            ):
+                skipped_started.append(
+                    self._to_generation_candidate(
+                        match=match,
+                        confidence=0.0,
+                        reason='started_or_inside_buffer',
+                    )
+                )
+                continue
+
+            context = await self._gemini.extract_context(match)
+            model_result = self._probability.predict(match, context)
+            decision = self._decide_match(
+                sport=sport,
+                probabilities=model_result.probabilities,
+                context=context,
+                match=match,
+            )
+            league_risk = self._league_risk_profile(
+                sport=sport,
+                competition_code=match.competition_code,
+            )
+            total_penalty = min(0.35, match.confidence_penalty + league_risk.penalty)
+            confidence, implied_odds = self._apply_match_penalty(
+                decision_confidence=decision.confidence,
+                decision_implied_odds=decision.implied_odds,
+                penalty=total_penalty,
+            )
+            staged.append(
+                StagedPrediction(
+                    record=PickRecord(
+                        id=str(uuid4()),
+                        external_match_id=match.external_match_id,
+                        pick_date=target_date,
+                        sport=sport.value,
+                        league=match.league,
+                        home_team=match.home_team,
+                        away_team=match.away_team,
+                        kick_off_utc=match.kick_off_utc,
+                        market=decision.market,
+                        selection=decision.selection,
+                        confidence=confidence,
+                        implied_odds=implied_odds,
+                        rationale=decision.rationale,
+                        model_version=model_result.model_version,
+                    ),
+                    data_completeness=match.data_completeness,
+                    sport=sport,
+                    competition_code=match.competition_code,
+                    risk=league_risk,
+                )
+            )
+
+        kept = self._filter_staged_predictions(staged=staged, min_confidence=min_confidence) if staged else []
+        kept_ids = {item.record.id for item in kept}
+        primary_ids = self._select_primary_ids(staged=kept) if kept else set()
+        low_confidence = [
+            self._to_generation_candidate_from_staged(item=item, reason='below_min_confidence')
+            for item in staged
+            if item.record.id not in kept_ids
+        ]
+        kept_rows = [
+            self._to_generation_candidate_from_staged(
+                item=item,
+                reason='primary_candidate' if item.record.id in primary_ids else 'kept_candidate',
+            )
+            for item in kept
+        ]
+
+        return GenerationDiagnosticsResponse(
+            date=target_date,
+            sport=sport,
+            provider=self._settings.sports_provider,
+            configured_competitions=self._sports._get_competitions(sport),
+            min_confidence=min_confidence,
+            fetched_matches=len(matches),
+            staged_matches=len(staged),
+            kept_matches=len(kept),
+            primary_matches=len(primary_ids),
+            skipped_started_matches=len(skipped_started),
+            low_confidence_matches=len(low_confidence),
+            competitions=[GenerationCompetitionDiagnostic(**row) for row in competition_rows],
+            skipped_started=skipped_started[:20],
+            low_confidence=low_confidence[:20],
+            kept=kept_rows[:20],
+        )
 
     async def _refresh_daily_picks(
         self,

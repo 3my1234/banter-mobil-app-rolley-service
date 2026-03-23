@@ -11,6 +11,7 @@ from .schemas import (
     AdminStakeListResponse,
     AdminStakePayoutResponse,
     AutoSettlementResponse,
+    GenerationDiagnosticsResponse,
     DailyProductFactorOverrideRequest,
     DailyProductFactorOverrideResponse,
     DailyProductVoidResponse,
@@ -183,6 +184,19 @@ def get_admin_picks(
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
     target_date = pick_date or date.today()
     return {'date': target_date, 'sport': sport, 'picks': service.list_settlement_candidates(db, target_date=target_date, sport=sport)}
+
+
+@app.get(f'{settings.api_prefix}/admin/picks/diagnostics', response_model=GenerationDiagnosticsResponse)
+async def get_admin_pick_diagnostics(
+    pick_date: date | None = Query(default=None),
+    sport: Sport = Query(...),
+    x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
+    db: Session = Depends(get_db),
+):
+    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    target_date = pick_date or date.today()
+    return await service.get_generation_diagnostics(db, target_date=target_date, sport=sport)
 
 
 @app.get(f'{settings.api_prefix}/admin/picks/history', response_model=PickHistoryResponse)

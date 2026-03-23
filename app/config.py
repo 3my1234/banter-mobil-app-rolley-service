@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     soccer_competitions: str = (
         'eng.1,esp.1,ger.1,ita.1,fra.1,uefa.champions,uefa.europa,uefa.europa.conf,'
         'ned.1,por.1,bel.1,sco.1,sui.1,aut.1,swe.1,nor.1,den.1,usa.1,mex.1,bra.1,arg.1,'
-        'aus.1,jpn.1,chn.1,ksa.1'
+        'aus.1,jpn.1,chn.1,ksa.1,eng.2,esp.2,col.1,par.1,ecu.1,ven.1,ind.1,nga.1'
     )
     basketball_competitions: str = 'nba'
     same_day_only: bool = True
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     primary_pick_count: int = 1
     primary_min_completeness: float = 0.65
     prediction_min_confidence: float = 0.90
-    prediction_min_confidence_soccer: float | None = None
+    prediction_min_confidence_soccer: float | None = 0.82
     prediction_min_confidence_basketball: float | None = None
     prediction_max_picks_per_sport: int = 3
     prediction_exclude_started_matches: bool = True

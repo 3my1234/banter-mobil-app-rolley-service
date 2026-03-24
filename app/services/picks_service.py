@@ -1141,11 +1141,12 @@ class PicksService:
     def _apply_daily_product_to_stakes(self, db: Session, *, daily_product: DailyProduct) -> None:
         product_outcome = SettlementOutcome(daily_product.outcome)
         positions = db.scalars(
-            select(StakePosition).where(
+            select(StakePosition)
+            .options(joinedload(StakePosition.daily_results))
+            .where(
                 StakePosition.status == StakeStatus.ACTIVE.value,
                 StakePosition.sport == daily_product.sport,
                 StakePosition.starts_on <= daily_product.product_date,
-                StakePosition.ends_on >= daily_product.product_date,
             )
         ).all()
 
@@ -1162,6 +1163,7 @@ class PicksService:
             if exists:
                 continue
 
+            completed_days = len(position.daily_results or [])
             starting = Decimal(position.current_raw)
             ending = (starting * factor).quantize(Decimal('1'), rounding=ROUND_FLOOR)
             position.current_raw = str(max(ending, Decimal('0')))
@@ -1173,7 +1175,7 @@ class PicksService:
                 position.gross_profit_raw = '0'
                 position.platform_fee_raw = '0'
                 position.net_payout_raw = '0'
-            elif daily_product.product_date >= position.ends_on:
+            elif completed_days + 1 >= position.lock_days:
                 self._mature_position(position)
 
             db.add(

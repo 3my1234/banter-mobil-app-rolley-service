@@ -76,12 +76,10 @@ Replace providers with real feeds:
   - `LEAGUE_RISK_PENALIZE_UNTRUSTED=false`
 - Gemini key in env enriches urgency/volatility features.
 - Probability engine in `app/reasoning.py` loads trained XGBoost from `XGBOOST_MODEL_PATH`.
-- Runtime deploys use the heuristic engine by default. XGBoost is optional and intended for offline training / explicit enablement.
 
 ## Train XGBoost
 ```bash
 cd rolley-service
-pip install -r requirements-training.txt
 python scripts/train_xgboost.py
 # or with your labeled csv:
 # python scripts/train_xgboost.py --dataset data/historical_training.csv --output models/rolley_xgb_v1.json --version xgb-v1

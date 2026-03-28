@@ -51,7 +51,7 @@ app.add_middleware(
 @app.on_event('startup')
 async def startup_event() -> None:
     init_db()
-    if settings.cron_enabled:
+    if settings.run_scheduler and settings.cron_enabled:
         scheduler.add_job(
             _run_daily_refresh,
             trigger='cron',
@@ -60,7 +60,7 @@ async def startup_event() -> None:
             id='daily-picks-refresh',
             replace_existing=True,
         )
-    if settings.auto_settlement_enabled:
+    if settings.run_scheduler and settings.auto_settlement_enabled:
         scheduler.add_job(
             _run_auto_settlement,
             trigger='cron',
@@ -69,7 +69,7 @@ async def startup_event() -> None:
             id='daily-picks-auto-settlement',
             replace_existing=True,
         )
-    if (settings.cron_enabled or settings.auto_settlement_enabled) and not scheduler.running:
+    if settings.run_scheduler and (settings.cron_enabled or settings.auto_settlement_enabled) and not scheduler.running:
         scheduler.start()
 
 

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     admin_refresh_key: str | None = None
 
     cron_enabled: bool = True
+    run_scheduler: bool = True
     cron_hour_utc: int = 8
     cron_minute_utc: int = 0
     auto_settlement_enabled: bool = True

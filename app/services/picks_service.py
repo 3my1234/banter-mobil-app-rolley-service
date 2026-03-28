@@ -1157,6 +1157,7 @@ class PicksService:
 
         reference_pick_id = self._reference_pick_id_for_product(daily_product)
         factor = self._daily_product_factor(daily_product)
+        affected_stake_ids: set[str] = set()
 
         for position in positions:
             exists = db.scalar(
@@ -1168,20 +1169,8 @@ class PicksService:
             if exists:
                 continue
 
-            completed_days = len(position.daily_results or [])
             starting = Decimal(position.current_raw)
             ending = (starting * factor).quantize(Decimal('1'), rounding=ROUND_FLOOR)
-            position.current_raw = str(max(ending, Decimal('0')))
-            position.total_factor = float(Decimal(str(position.total_factor)) * factor)
-
-            if product_outcome == SettlementOutcome.LOSS:
-                position.status = StakeStatus.LOST.value
-                position.matured_at = datetime.utcnow()
-                position.gross_profit_raw = '0'
-                position.platform_fee_raw = '0'
-                position.net_payout_raw = '0'
-            elif completed_days + 1 >= position.lock_days:
-                self._mature_position(position)
 
             db.add(
                 StakeDailyResult(
@@ -1193,10 +1182,23 @@ class PicksService:
                     outcome=product_outcome.value,
                     factor=float(factor),
                     starting_raw=str(starting),
-                    ending_raw=position.current_raw,
+                    ending_raw=str(max(ending, Decimal('0'))),
                 )
             )
-            db.add(position)
+            affected_stake_ids.add(position.id)
+
+        db.flush()
+
+        for stake_id in affected_stake_ids:
+            stake = db.scalar(
+                select(StakePosition)
+                .options(joinedload(StakePosition.daily_results))
+                .where(StakePosition.id == stake_id)
+            )
+            if not stake:
+                continue
+            self._recompute_stake_from_results(stake)
+            db.add(stake)
 
         db.flush()
 

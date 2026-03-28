@@ -2,11 +2,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+ENV PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10
+
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
-  && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --default-timeout=300 -r requirements.txt
 
 COPY app ./app
 COPY models ./models

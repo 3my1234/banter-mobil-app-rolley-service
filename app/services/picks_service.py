@@ -1140,15 +1140,20 @@ class PicksService:
 
     def _apply_daily_product_to_stakes(self, db: Session, *, daily_product: DailyProduct) -> None:
         product_outcome = SettlementOutcome(daily_product.outcome)
-        positions = db.scalars(
-            select(StakePosition)
-            .options(joinedload(StakePosition.daily_results))
-            .where(
-                StakePosition.status == StakeStatus.ACTIVE.value,
-                StakePosition.sport == daily_product.sport,
-                StakePosition.starts_on <= daily_product.product_date,
+        positions = (
+            db.execute(
+                select(StakePosition)
+                .options(joinedload(StakePosition.daily_results))
+                .where(
+                    StakePosition.status == StakeStatus.ACTIVE.value,
+                    StakePosition.sport == daily_product.sport,
+                    StakePosition.starts_on <= daily_product.product_date,
+                )
             )
-        ).all()
+            .unique()
+            .scalars()
+            .all()
+        )
 
         reference_pick_id = self._reference_pick_id_for_product(daily_product)
         factor = self._daily_product_factor(daily_product)

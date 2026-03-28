@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     league_risk_confidence_penalty: float = 0.12
     league_risk_penalize_untrusted: bool = False
 
-    xgboost_enabled: bool = True
+    xgboost_enabled: bool = False
     xgboost_model_path: str = './models/rolley_xgb_v1.json'
     xgboost_feature_names: str = (
         'h2h_home_win_rate,h2h_draw_rate,h2h_away_win_rate,home_form_index,away_form_index,'

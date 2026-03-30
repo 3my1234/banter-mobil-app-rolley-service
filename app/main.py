@@ -106,13 +106,17 @@ def health() -> dict:
 
 
 @app.get(f'{settings.api_prefix}/picks/daily')
-def get_daily_picks(
+async def get_daily_picks(
     sport: Sport = Query(...),
     pick_date: date | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     target_date = pick_date or date.today()
-    return service.get_daily(db, target_date=target_date, sport=sport)
+    result = service.get_daily(db, target_date=target_date, sport=sport)
+    if target_date == date.today() and not result.picks:
+        await service.refresh_daily_picks(db, target_date=target_date)
+        result = service.get_daily(db, target_date=target_date, sport=sport)
+    return result
 
 
 @app.get(f'{settings.api_prefix}/picks/latest')
@@ -140,13 +144,17 @@ def get_pick_history(
 
 
 @app.get(f'{settings.api_prefix}/products/daily', response_model=DailyProductsResponse)
-def get_daily_products(
+async def get_daily_products(
     sport: Sport = Query(...),
     pick_date: date | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     target_date = pick_date or date.today()
-    return service.get_daily_products(db, target_date=target_date, sport=sport)
+    products = service.get_daily_products(db, target_date=target_date, sport=sport)
+    if target_date == date.today() and not products.products:
+        await service.refresh_daily_picks(db, target_date=target_date)
+        products = service.get_daily_products(db, target_date=target_date, sport=sport)
+    return products
 
 
 @app.post(f'{settings.api_prefix}/picks/refresh', response_model=RefreshResponse)
@@ -177,7 +185,7 @@ async def rebuild_picks(
 
 
 @app.get(f'{settings.api_prefix}/admin/picks')
-def get_admin_picks(
+async def get_admin_picks(
     pick_date: date | None = Query(default=None),
     sport: Sport | None = Query(default=None),
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
@@ -186,7 +194,11 @@ def get_admin_picks(
     if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
         raise HTTPException(status_code=401, detail='Unauthorized refresh key')
     target_date = pick_date or date.today()
-    return {'date': target_date, 'sport': sport, 'picks': service.list_settlement_candidates(db, target_date=target_date, sport=sport)}
+    picks = service.list_settlement_candidates(db, target_date=target_date, sport=sport)
+    if target_date == date.today() and not picks:
+        await service.refresh_daily_picks(db, target_date=target_date)
+        picks = service.list_settlement_candidates(db, target_date=target_date, sport=sport)
+    return {'date': target_date, 'sport': sport, 'picks': picks}
 
 
 @app.get(f'{settings.api_prefix}/admin/picks/diagnostics', response_model=GenerationDiagnosticsResponse)

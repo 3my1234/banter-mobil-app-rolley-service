@@ -130,6 +130,40 @@ class PicksService:
             total += Decimal(str(getattr(row, attr)))
         return raw_to_asset_amount(str(total), decimals=decimals)
 
+    def _normalize_stake_rows(self, db: Session, rows: list[StakePosition]) -> None:
+        changed = False
+        for row in rows:
+            if row.status == StakeStatus.WITHDRAWN.value:
+                continue
+            snapshot = (
+                row.status,
+                row.current_raw,
+                row.total_factor,
+                row.gross_profit_raw,
+                row.creator_fee_raw,
+                row.creator_net_fee_raw,
+                row.platform_fee_raw,
+                row.net_payout_raw,
+                row.matured_at,
+            )
+            self._recompute_stake_from_results(row)
+            updated = (
+                row.status,
+                row.current_raw,
+                row.total_factor,
+                row.gross_profit_raw,
+                row.creator_fee_raw,
+                row.creator_net_fee_raw,
+                row.platform_fee_raw,
+                row.net_payout_raw,
+                row.matured_at,
+            )
+            if snapshot != updated:
+                changed = True
+                db.add(row)
+        if changed:
+            db.flush()
+
     def _to_generation_candidate(
         self,
         *,
@@ -944,6 +978,7 @@ class PicksService:
             .scalars()
             .all()
         )
+        self._normalize_stake_rows(db, rows)
         return StakeListResponse(user_id=user_id, stakes=[self._to_stake_view(row) for row in rows])
 
     def get_rollover_summary(self, db: Session, *, as_of_date: date) -> RolloverSummaryResponse:
@@ -967,6 +1002,7 @@ class PicksService:
             .scalars()
             .all()
         )
+        self._normalize_stake_rows(db, rows)
 
         active_rows = [row for row in rows if row.status == StakeStatus.ACTIVE.value]
         matured_rows = [row for row in rows if row.status == StakeStatus.MATURED.value]
@@ -1022,20 +1058,24 @@ class PicksService:
         stake_asset: StakeAsset,
         status: str | None = None,
     ) -> AdminStakeListResponse:
-        query = (
-            select(StakePosition)
-            .options(joinedload(StakePosition.daily_results))
-            .where(StakePosition.stake_asset == stake_asset.value)
-            .order_by(StakePosition.created_at.desc())
+        rows = (
+            db.execute(
+                select(StakePosition)
+                .options(joinedload(StakePosition.daily_results))
+                .where(StakePosition.stake_asset == stake_asset.value)
+                .order_by(StakePosition.created_at.desc())
+            )
+            .unique()
+            .scalars()
+            .all()
         )
-        if status:
-            query = query.where(StakePosition.status == status)
-        rows = db.execute(query).unique().scalars().all()
+        self._normalize_stake_rows(db, rows)
+        filtered_rows = [row for row in rows if not status or row.status == status]
         return AdminStakeListResponse(
             as_of_date=as_of_date,
             stake_asset=stake_asset,
             status=status,
-            stakes=[self._to_stake_view(row) for row in rows],
+            stakes=[self._to_stake_view(row) for row in filtered_rows],
         )
 
     def admin_payout_stake(self, db: Session, *, stake_id: str) -> AdminStakePayoutResponse:
@@ -1294,6 +1334,7 @@ class PicksService:
 
     def _recompute_stake_from_results(self, position: StakePosition) -> None:
         ordered_results = sorted(list(position.daily_results or []), key=lambda item: (item.pick_date, item.created_at))
+        existing_matured_at = position.matured_at
         current = Decimal(position.principal_raw)
         total_factor = Decimal('1')
         position.status = StakeStatus.ACTIVE.value
@@ -1309,7 +1350,7 @@ class PicksService:
                 item.ending_raw = '0'
                 total_factor = Decimal('0')
                 position.status = StakeStatus.LOST.value
-                position.matured_at = datetime.utcnow()
+                position.matured_at = existing_matured_at or datetime.utcnow()
                 break
             if item.outcome == SettlementOutcome.VOID.value:
                 item.factor = 1.0
@@ -1322,6 +1363,7 @@ class PicksService:
         position.current_raw = str(current)
         position.total_factor = float(total_factor.quantize(Decimal('0.0001')))
         if position.status == StakeStatus.ACTIVE.value and len(ordered_results) >= position.lock_days:
+            position.matured_at = existing_matured_at
             self._mature_position(position)
 
     def _mature_position(self, position: StakePosition) -> None:
@@ -1338,7 +1380,8 @@ class PicksService:
         net = max(Decimal('0'), current - creator_fee)
 
         position.status = StakeStatus.MATURED.value
-        position.matured_at = datetime.utcnow()
+        if not position.matured_at:
+            position.matured_at = datetime.utcnow()
         position.gross_profit_raw = str(profit)
         position.creator_fee_raw = str(creator_fee)
         position.creator_net_fee_raw = str(creator_net_fee)
@@ -1560,6 +1603,43 @@ class PicksService:
                 )
             )
 
+        if 3.5 in supported_handicap_lines:
+            home_plus_35_conf = clamp(float(probabilities.handicap_home_plus_15) + 0.08 + volatility * 0.03, 0.48)
+            home_plus_35_score = home_plus_35_conf + volatility * 0.05 - goal_floor * 0.05
+            candidates.append(
+                (
+                    home_plus_35_score,
+                    Decision(
+                        market='HANDICAP',
+                        selection='Home +3.5',
+                        confidence=round(home_plus_35_conf, 4),
+                        implied_odds=self._safe_odds_from_confidence(home_plus_35_conf),
+                        rationale=(
+                            'Reasoned market selection widened the handicap to Home +3.5 for additional protection '
+                            'where volatility, fatigue, or lineup uncertainty are elevated.'
+                        ),
+                    ),
+                )
+            )
+
+            away_plus_35_conf = clamp(float(probabilities.handicap_away_plus_15) + 0.08 + volatility * 0.03, 0.48)
+            away_plus_35_score = away_plus_35_conf + volatility * 0.05 - goal_floor * 0.05
+            candidates.append(
+                (
+                    away_plus_35_score,
+                    Decision(
+                        market='HANDICAP',
+                        selection='Away +3.5',
+                        confidence=round(away_plus_35_conf, 4),
+                        implied_odds=self._safe_odds_from_confidence(away_plus_35_conf),
+                        rationale=(
+                            'Reasoned market selection widened the handicap to Away +3.5 for additional protection '
+                            'where volatility, fatigue, or lineup uncertainty are elevated.'
+                        ),
+                    ),
+                )
+            )
+
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
 
@@ -1688,6 +1768,8 @@ class PicksService:
         if not self._settings.soccer_primary_prefer_safe_markets:
             return decision
         if decision.market.upper() != 'HANDICAP':
+            return decision
+        if decision.confidence >= 0.82:
             return decision
 
         goal_floor = max(0.0, min(1.0, (match.home_recent5_scored_rate + match.away_recent5_scored_rate) / 2))
@@ -2070,8 +2152,10 @@ class PicksService:
         size_bonus = 0.0
         if len(picks) == 2 and combined_odds >= (target_min - 0.03) and avg_confidence >= 0.68:
             size_bonus = float(self._settings.daily_product_prefer_two_leg_bonus)
-        elif len(picks) == 3 and target_min <= combined_odds <= target_max and avg_confidence >= 0.75:
+        elif len(picks) == 3 and (target_min - 0.02) <= combined_odds <= (target_max + 0.03) and avg_confidence >= 0.74:
             size_bonus = float(self._settings.daily_product_prefer_three_leg_bonus)
+        elif len(picks) >= 4 and (target_min - 0.03) <= combined_odds <= (target_max + 0.04) and avg_confidence >= 0.73:
+            size_bonus = float(self._settings.daily_product_prefer_four_leg_bonus)
         elif len(picks) == 1 and combined_odds < target_min:
             size_bonus = -0.03
 

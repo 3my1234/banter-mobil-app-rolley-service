@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -112,9 +113,20 @@ async def _run_auto_settlement() -> None:
         db.close()
 
 
-@app.get('/health')
-def health() -> dict:
-    return {'status': 'ok', 'service': settings.service_name, 'version': settings.service_version}
+@app.get('/health', response_class=PlainTextResponse)
+def health() -> str:
+    # Keep a plain OK response for strict platform healthcheck text matching.
+    return 'OK'
+
+
+@app.get('/healthz')
+def healthz() -> dict:
+    return {
+        'status': 'ok',
+        'service': settings.service_name,
+        'version': settings.service_version,
+        'admin_keys_configured': len(ADMIN_KEYS),
+    }
 
 
 @app.get(f'{settings.api_prefix}/picks/daily')

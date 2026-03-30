@@ -2055,9 +2055,10 @@ class PicksService:
         if not picks:
             return [], {}
 
-        min_legs = max(1, int(self._settings.daily_product_min_legs))
-        max_legs = max(min_legs, int(self._settings.daily_product_max_legs))
+        requested_min_legs = max(1, int(self._settings.daily_product_min_legs))
+        max_legs = max(requested_min_legs, int(self._settings.daily_product_max_legs))
         max_legs = min(max_legs, len(picks))
+        min_legs = min(requested_min_legs, max_legs) if max_legs > 0 else 1
 
         ordered = sorted(
             picks,
@@ -2087,7 +2088,8 @@ class PicksService:
         ]
         if self._odds.enabled and market_quotes and not safe_singles:
             return [], market_quotes
-        fallback = safe_singles[:1] or ordered[:1]
+        fallback_count = max(1, min(max_legs, len(safe_singles) if safe_singles else len(ordered)))
+        fallback = safe_singles[:fallback_count] or ordered[:fallback_count]
         return fallback, market_quotes
 
     def _daily_product_combo_is_valid(

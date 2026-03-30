@@ -39,13 +39,25 @@ scheduler = AsyncIOScheduler(timezone='UTC')
 app = FastAPI(title=settings.service_name, version=settings.service_version)
 
 origins = [origin.strip() for origin in settings.cors_origins.split(',') if origin.strip()]
+allow_all_origins = not origins or '*' in origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins if origins else ['*'],
+    allow_origins=['*'] if allow_all_origins else origins,
     allow_methods=['*'],
     allow_headers=['*'],
-    allow_credentials=True,
+    # Browsers reject wildcard origins when credentials are enabled.
+    allow_credentials=not allow_all_origins,
 )
+
+ADMIN_KEYS = settings.resolved_admin_keys()
+
+
+def require_admin_key(x_admin_key: str | None) -> None:
+    if not ADMIN_KEYS:
+        return
+    token = (x_admin_key or '').strip()
+    if token not in ADMIN_KEYS:
+        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
 
 
 @app.on_event('startup')
@@ -163,8 +175,7 @@ async def refresh_picks(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
 
     target_date = refresh_date or date.today()
     return await service.refresh_daily_picks(db, target_date=target_date)
@@ -177,8 +188,7 @@ async def rebuild_picks(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
 
     target_date = pick_date or date.today()
     return await service.rebuild_daily_picks(db, target_date=target_date, sport=sport)
@@ -191,8 +201,7 @@ async def get_admin_picks(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     target_date = pick_date or date.today()
     picks = service.list_settlement_candidates(db, target_date=target_date, sport=sport)
     if target_date == date.today() and not picks:
@@ -208,8 +217,7 @@ async def get_admin_pick_diagnostics(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     target_date = pick_date or date.today()
     return await service.get_generation_diagnostics(db, target_date=target_date, sport=sport)
 
@@ -223,8 +231,7 @@ def get_admin_pick_history(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     return PickHistoryResponse(
         sport=sport,
         before_date=before_date,
@@ -240,8 +247,7 @@ async def settle_pick(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     try:
         pick = await service.settle_pick(db, pick_id=pick_id, payload=payload)
     except ValueError as error:
@@ -266,8 +272,7 @@ async def auto_settle_picks(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     target_date = pick_date or (date.today() - timedelta(days=max(settings.auto_settlement_offset_days, 1)))
     return await service.auto_settle_date(db, target_date=target_date, settled_by='ADMIN_AUTO')
 
@@ -279,8 +284,7 @@ def get_rollover_summary(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     return service.get_rollover_summary_by_asset(db, as_of_date=as_of_date or date.today(), stake_asset=stake_asset)
 
 
@@ -292,8 +296,7 @@ def get_rollover_positions(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     return service.list_rollover_positions(db, as_of_date=as_of_date or date.today(), stake_asset=stake_asset, status=status)
 
 
@@ -303,8 +306,7 @@ def payout_rollover_position(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     try:
         return service.admin_payout_stake(db, stake_id=stake_id)
     except ValueError as error:
@@ -318,8 +320,7 @@ def override_daily_product_factor(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     try:
         return service.override_daily_product_factor(db, product_id=product_id, factor=payload.factor)
     except ValueError as error:
@@ -332,8 +333,7 @@ def void_daily_product(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     try:
         return service.void_daily_product(db, product_id=product_id)
     except ValueError as error:
@@ -363,8 +363,7 @@ def create_creator(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     try:
         return {'success': True, 'creator': service.create_creator(db, payload)}
     except ValueError as error:
@@ -377,8 +376,7 @@ def create_program(
     x_admin_key: str | None = Header(default=None, alias='X-Admin-Key'),
     db: Session = Depends(get_db),
 ):
-    if settings.admin_refresh_key and x_admin_key != settings.admin_refresh_key:
-        raise HTTPException(status_code=401, detail='Unauthorized refresh key')
+    require_admin_key(x_admin_key)
     try:
         return {'success': True, 'program': service.create_program(db, payload)}
     except ValueError as error:
@@ -411,3 +409,4 @@ def withdraw_stake(
         return service.withdraw_stake(db, stake_id=stake_id, user_id=user_id)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
+

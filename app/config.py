@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     api_prefix: str = '/api/v1'
     database_url: str = 'sqlite:///./rolley.db'
 
-    cors_origins: str = '*'
+    cors_origins: str = 'https://admin.sportbanter.online,https://sportbanter.online,http://localhost:5173,http://localhost:3000'
 
     gemini_api_key: str | None = None
     gemini_model: str = 'gemini-2.5-flash'
@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     odds_sanity_handicap_max: float = 1.50
 
     admin_refresh_key: str | None = None
+    admin_refresh_keys: str = ''
+    rolley_admin_key: str | None = None
+    vite_rolley_admin_key: str | None = None
 
     cron_enabled: bool = True
     run_scheduler: bool = True
@@ -107,6 +110,21 @@ class Settings(BaseSettings):
     movement_settlement_module_address: str | None = None
     movement_rol_metadata_address: str | None = None
     movement_pick_metadata_base_url: str = 'https://sportbanter.online/rolley/picks'
+
+    def resolved_admin_keys(self) -> set[str]:
+        keys: set[str] = set()
+        for raw in (
+            self.admin_refresh_key,
+            self.rolley_admin_key,
+            self.vite_rolley_admin_key,
+        ):
+            if isinstance(raw, str) and raw.strip():
+                keys.add(raw.strip())
+        for raw in self.admin_refresh_keys.split(','):
+            key = raw.strip()
+            if key:
+                keys.add(key)
+        return keys
 
 
 @lru_cache

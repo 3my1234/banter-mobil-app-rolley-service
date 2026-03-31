@@ -1769,7 +1769,9 @@ class PicksService:
             return decision
         if decision.market.upper() != 'HANDICAP':
             return decision
-        if decision.confidence >= 0.82:
+        # Keep handicap decisions when confidence is reasonably strong; only
+        # fallback when the protection signal is weak.
+        if decision.confidence >= 0.75:
             return decision
 
         goal_floor = max(0.0, min(1.0, (match.home_recent5_scored_rate + match.away_recent5_scored_rate) / 2))
@@ -1817,6 +1819,19 @@ class PicksService:
                 'Soccer safe-market guardrail replaced handicap with double chance coverage.',
             ),
         ]
+
+        # In less goal-open and side-leaning matchups, avoid always forcing
+        # totals and allow double-chance to win ties.
+        if goal_floor < 0.62 and h2h_balance < 0.6:
+            safe_candidates = [
+                (
+                    market,
+                    selection,
+                    confidence + (0.015 if market == 'DOUBLE_CHANCE' else 0.0),
+                    rationale,
+                )
+                for market, selection, confidence, rationale in safe_candidates
+            ]
 
         market, selection, confidence, rationale = max(safe_candidates, key=lambda item: item[2])
         return Decision(
@@ -2075,7 +2090,8 @@ class PicksService:
                 if not self._daily_product_combo_is_valid(combo_list, sport=sport, market_quotes=market_quotes):
                     continue
                 score = self._score_daily_product_combo(combo_list, sport=sport, market_quotes=market_quotes)
-                rank = (score[0], -float(size))
+                # Prefer larger baskets only when score is comparable.
+                rank = (score[0], float(size))
                 if best_rank is None or rank > best_rank:
                     best_rank = rank
                     best_picks = combo_list
@@ -2163,7 +2179,7 @@ class PicksService:
 
         if sport == Sport.SOCCER:
             safe_bonus = sum(
-                0.03
+                0.015
                 for pick in picks
                 if (pick.market.upper(), pick.selection.upper()) in {
                     ('TOTAL_GOALS', 'OVER 0.5'),
@@ -2172,6 +2188,15 @@ class PicksService:
                     ('DOUBLE_CHANCE', 'X2'),
                 }
             )
+            handicap_conf_bonus = sum(
+                0.02
+                for pick in picks
+                if pick.market.upper() in {'HANDICAP', 'ALT_SPREAD'} and float(pick.confidence) >= 0.74
+            )
+            market_mix_bonus = 0.02 if len(market_counts) >= 2 else 0.0
+            total_goals_count = market_counts.get('TOTAL_GOALS', 0)
+            repetitive_totals_penalty = max(0, total_goals_count - 2) * 0.04
+            safe_bonus = safe_bonus + handicap_conf_bonus + market_mix_bonus - repetitive_totals_penalty
         else:
             mixed_side_bonus = (
                 0.03

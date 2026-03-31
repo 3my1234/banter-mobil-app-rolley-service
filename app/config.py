@@ -71,13 +71,13 @@ class Settings(BaseSettings):
     soccer_primary_prefer_safe_markets: bool = True
     soccer_primary_allow_handicap_fallback: bool = True
     soccer_supported_handicap_lines: str = '1.5,2.5,3.5'
-    daily_product_min_legs: int = 3
+    daily_product_min_legs: int = 2
     daily_product_max_legs: int = 4
     daily_product_target_multiplier_min: float = 1.08
     daily_product_target_multiplier_max: float = 1.15
-    daily_product_prefer_two_leg_bonus: float = 0.01
+    daily_product_prefer_two_leg_bonus: float = 0.03
     daily_product_prefer_three_leg_bonus: float = 0.05
-    daily_product_prefer_four_leg_bonus: float = 0.08
+    daily_product_prefer_four_leg_bonus: float = 0.06
     soccer_daily_product_max_double_chance_legs: int = 1
     soccer_daily_product_max_same_market_legs: int = 3
     basketball_daily_product_prefer_mixed_sides: bool = True

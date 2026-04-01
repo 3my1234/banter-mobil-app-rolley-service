@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     prediction_start_buffer_minutes: int = 0
     soccer_primary_prefer_safe_markets: bool = True
     soccer_primary_allow_handicap_fallback: bool = True
+    soccer_primary_safe_market_confidence_margin: float = 0.03
     soccer_supported_handicap_lines: str = '1.5,2.5,3.5'
     daily_product_min_legs: int = 2
     daily_product_max_legs: int = 4

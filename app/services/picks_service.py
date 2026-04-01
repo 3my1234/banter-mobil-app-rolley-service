@@ -1423,6 +1423,10 @@ class PicksService:
     def _decide_soccer_reasoned(self, *, probabilities, context, match: MatchCandidate) -> Decision:
         goal_floor = max(0.0, min(1.0, (match.home_recent5_scored_rate + match.away_recent5_scored_rate) / 2))
         h2h_balance = 1.0 - min(1.0, abs(match.h2h_home_win_rate - match.h2h_away_win_rate))
+        # High when fixture profile is balanced and goal environment is thin.
+        draw_pressure = max(0.0, min(1.0, h2h_balance * (1.0 - goal_floor)))
+        # High when projected scoring floor is weak.
+        low_goal_pressure = max(0.0, min(1.0, (0.62 - goal_floor) / 0.62))
         strength_gap = match.home_recent5_opponent_strength - match.away_recent5_opponent_strength
         form_gap = match.home_form_index - match.away_form_index
         goal_diff_gap = (match.home_recent5_goal_diff - match.away_recent5_goal_diff) / 10.0
@@ -1437,7 +1441,14 @@ class PicksService:
         candidates: list[tuple[float, Decision]] = []
 
         over05_conf = clamp(max(float(probabilities.over_05), goal_floor * 0.92), 0.45)
-        over05_score = over05_conf + goal_floor * 0.10 + h2h_balance * 0.03 - weather * 0.02
+        over05_score = (
+            over05_conf
+            + goal_floor * 0.10
+            + h2h_balance * 0.03
+            - weather * 0.02
+            - draw_pressure * 0.05
+            - low_goal_pressure * 0.04
+        )
         candidates.append(
             (
                 over05_score,
@@ -1455,7 +1466,16 @@ class PicksService:
         )
 
         over15_conf = clamp(max(float(probabilities.over_15), goal_floor * 0.75), 0.35, 0.95)
-        over15_score = over15_conf + goal_floor * 0.08 + h2h_balance * 0.05 + urgency * 0.02 - volatility * 0.03
+        over15_score = (
+            over15_conf
+            + goal_floor * 0.08
+            + h2h_balance * 0.05
+            + urgency * 0.02
+            - volatility * 0.03
+            - draw_pressure * 0.14
+            - low_goal_pressure * 0.12
+            - weather * 0.03
+        )
         candidates.append(
             (
                 over15_score,
@@ -1480,7 +1500,14 @@ class PicksService:
             + max(0.0, injury_gap) * 0.04,
             0.4,
         )
-        one_x_score = one_x_conf + max(0.0, form_gap) * 0.10 + max(0.0, strength_gap) * 0.08 - goal_floor * 0.03
+        one_x_score = (
+            one_x_conf
+            + max(0.0, form_gap) * 0.10
+            + max(0.0, strength_gap) * 0.08
+            - goal_floor * 0.03
+            + draw_pressure * 0.05
+            + low_goal_pressure * 0.03
+        )
         candidates.append(
             (
                 one_x_score,
@@ -1505,7 +1532,14 @@ class PicksService:
             + max(0.0, -injury_gap) * 0.04,
             0.4,
         )
-        x2_score = x2_conf + max(0.0, -form_gap) * 0.10 + max(0.0, -strength_gap) * 0.08 - goal_floor * 0.03
+        x2_score = (
+            x2_conf
+            + max(0.0, -form_gap) * 0.10
+            + max(0.0, -strength_gap) * 0.08
+            - goal_floor * 0.03
+            + draw_pressure * 0.05
+            + low_goal_pressure * 0.03
+        )
         candidates.append(
             (
                 x2_score,
@@ -1528,7 +1562,13 @@ class PicksService:
                 float(probabilities.handicap_home_plus_15) + volatility * 0.04 - max(0.0, -form_gap) * 0.05,
                 0.4,
             )
-            home_handicap_score = home_handicap_conf + volatility * 0.06 - goal_floor * 0.02
+            home_handicap_score = (
+                home_handicap_conf
+                + volatility * 0.06
+                + draw_pressure * 0.11
+                + low_goal_pressure * 0.08
+                - goal_floor * 0.02
+            )
             candidates.append(
                 (
                     home_handicap_score,
@@ -1549,7 +1589,13 @@ class PicksService:
                 float(probabilities.handicap_away_plus_15) + volatility * 0.04 - max(0.0, form_gap) * 0.05,
                 0.4,
             )
-            away_handicap_score = away_handicap_conf + volatility * 0.06 - goal_floor * 0.02
+            away_handicap_score = (
+                away_handicap_conf
+                + volatility * 0.06
+                + draw_pressure * 0.11
+                + low_goal_pressure * 0.08
+                - goal_floor * 0.02
+            )
             candidates.append(
                 (
                     away_handicap_score,
@@ -1568,7 +1614,13 @@ class PicksService:
 
         if 2.5 in supported_handicap_lines:
             home_plus_25_conf = clamp(float(probabilities.handicap_home_plus_15) + 0.05 + volatility * 0.03, 0.45)
-            home_plus_25_score = home_plus_25_conf + volatility * 0.05 - goal_floor * 0.04
+            home_plus_25_score = (
+                home_plus_25_conf
+                + volatility * 0.05
+                + draw_pressure * 0.08
+                + low_goal_pressure * 0.06
+                - goal_floor * 0.04
+            )
             candidates.append(
                 (
                     home_plus_25_score,
@@ -1586,7 +1638,13 @@ class PicksService:
             )
 
             away_plus_25_conf = clamp(float(probabilities.handicap_away_plus_15) + 0.05 + volatility * 0.03, 0.45)
-            away_plus_25_score = away_plus_25_conf + volatility * 0.05 - goal_floor * 0.04
+            away_plus_25_score = (
+                away_plus_25_conf
+                + volatility * 0.05
+                + draw_pressure * 0.08
+                + low_goal_pressure * 0.06
+                - goal_floor * 0.04
+            )
             candidates.append(
                 (
                     away_plus_25_score,
@@ -1605,7 +1663,13 @@ class PicksService:
 
         if 3.5 in supported_handicap_lines:
             home_plus_35_conf = clamp(float(probabilities.handicap_home_plus_15) + 0.08 + volatility * 0.03, 0.48)
-            home_plus_35_score = home_plus_35_conf + volatility * 0.05 - goal_floor * 0.05
+            home_plus_35_score = (
+                home_plus_35_conf
+                + volatility * 0.05
+                + draw_pressure * 0.06
+                + low_goal_pressure * 0.06
+                - goal_floor * 0.05
+            )
             candidates.append(
                 (
                     home_plus_35_score,
@@ -1623,7 +1687,13 @@ class PicksService:
             )
 
             away_plus_35_conf = clamp(float(probabilities.handicap_away_plus_15) + 0.08 + volatility * 0.03, 0.48)
-            away_plus_35_score = away_plus_35_conf + volatility * 0.05 - goal_floor * 0.05
+            away_plus_35_score = (
+                away_plus_35_conf
+                + volatility * 0.05
+                + draw_pressure * 0.06
+                + low_goal_pressure * 0.06
+                - goal_floor * 0.05
+            )
             candidates.append(
                 (
                     away_plus_35_score,
@@ -1904,7 +1974,19 @@ class PicksService:
         if is_soccer and self._settings.soccer_primary_prefer_safe_markets:
             safe = [item for item in source if item.record.market.upper() in SAFE_SOCCER_PRIMARY_MARKETS]
             if safe:
-                source = safe
+                # Prefer safe markets by default, but allow handicap/alt-spread to
+                # become primary when it is materially stronger.
+                def _rank_key(item: StagedPrediction) -> tuple[float, float]:
+                    return (float(item.record.confidence), float(item.data_completeness))
+
+                best_safe = max(safe, key=_rank_key)
+                best_overall = max(source, key=_rank_key)
+                margin = max(0.0, float(self._settings.soccer_primary_safe_market_confidence_margin))
+                best_is_handicap = best_overall.record.market.upper() in {'HANDICAP', 'ALT_SPREAD'}
+                materially_stronger = float(best_overall.record.confidence) >= float(best_safe.record.confidence) + margin
+
+                if not (best_is_handicap and materially_stronger):
+                    source = safe
             elif not self._settings.soccer_primary_allow_handicap_fallback:
                 return set()
 
@@ -2179,7 +2261,7 @@ class PicksService:
 
         if sport == Sport.SOCCER:
             safe_bonus = sum(
-                0.015
+                0.01
                 for pick in picks
                 if (pick.market.upper(), pick.selection.upper()) in {
                     ('TOTAL_GOALS', 'OVER 0.5'),
@@ -2189,14 +2271,23 @@ class PicksService:
                 }
             )
             handicap_conf_bonus = sum(
-                0.02
+                0.03
                 for pick in picks
-                if pick.market.upper() in {'HANDICAP', 'ALT_SPREAD'} and float(pick.confidence) >= 0.74
+                if pick.market.upper() in {'HANDICAP', 'ALT_SPREAD'} and float(pick.confidence) >= 0.72
             )
             market_mix_bonus = 0.02 if len(market_counts) >= 2 else 0.0
+            has_handicap = any(pick.market.upper() in {'HANDICAP', 'ALT_SPREAD'} for pick in picks)
+            has_totals_or_dc = any(pick.market.upper() in {'TOTAL_GOALS', 'DOUBLE_CHANCE'} for pick in picks)
+            handicap_mix_bonus = 0.025 if has_handicap and has_totals_or_dc else 0.0
             total_goals_count = market_counts.get('TOTAL_GOALS', 0)
-            repetitive_totals_penalty = max(0, total_goals_count - 2) * 0.04
-            safe_bonus = safe_bonus + handicap_conf_bonus + market_mix_bonus - repetitive_totals_penalty
+            repetitive_totals_penalty = max(0, total_goals_count - 1) * 0.05
+            safe_bonus = (
+                safe_bonus
+                + handicap_conf_bonus
+                + market_mix_bonus
+                + handicap_mix_bonus
+                - repetitive_totals_penalty
+            )
         else:
             mixed_side_bonus = (
                 0.03

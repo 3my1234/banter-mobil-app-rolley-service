@@ -2600,6 +2600,13 @@ class PicksService:
             key=lambda item: (item.pick_date, item.created_at),
         )
         latest_result = ordered_results[-1] if ordered_results else None
+        if row.status == StakeStatus.LOST.value and ordered_results:
+            # For terminal LOST positions, expose the triggering loss as "latest"
+            # to avoid confusing "WIN + LOST" combinations in downstream UIs.
+            latest_result = next(
+                (item for item in ordered_results if item.outcome == SettlementOutcome.LOSS.value),
+                latest_result,
+            )
         decimals = row.asset_decimals or self._asset_decimals(row.stake_asset)
         program = row.program
         creator = program.creator if program else None

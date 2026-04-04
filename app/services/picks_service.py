@@ -254,6 +254,12 @@ class PicksService:
                 context=context,
                 match=match,
             )
+            decision = self._apply_soccer_market_guardrail(
+                sport=sport,
+                decision=decision,
+                probabilities=model_result.probabilities,
+                match=match,
+            )
             league_risk = self._league_risk_profile(
                 sport=sport,
                 competition_code=match.competition_code,
@@ -473,6 +479,12 @@ class PicksService:
                     sport=current_sport,
                     probabilities=model_result.probabilities,
                     context=context,
+                    match=match,
+                )
+                decision = self._apply_soccer_market_guardrail(
+                    sport=current_sport,
+                    decision=decision,
+                    probabilities=model_result.probabilities,
                     match=match,
                 )
                 league_risk = self._league_risk_profile(
@@ -1837,21 +1849,24 @@ class PicksService:
             return decision
         if not self._settings.soccer_primary_prefer_safe_markets:
             return decision
-        if decision.market.upper() != 'HANDICAP':
-            return decision
-        # Keep handicap decisions when confidence is reasonably strong; only
-        # fallback when the protection signal is weak.
-        if decision.confidence >= 0.75:
-            return decision
+
+        def clamp(value: float, floor: float = 0.30, ceil: float = 0.99) -> float:
+            return max(floor, min(ceil, value))
 
         goal_floor = max(0.0, min(1.0, (match.home_recent5_scored_rate + match.away_recent5_scored_rate) / 2))
         h2h_balance = 1.0 - min(1.0, abs(match.h2h_home_win_rate - match.h2h_away_win_rate))
+        draw_rate = max(0.0, min(1.0, float(match.h2h_draw_rate)))
+        draw_pressure = max(0.0, min(1.0, h2h_balance * (1.0 - goal_floor)))
+        low_goal_pressure = max(0.0, min(1.0, (0.62 - goal_floor) / 0.62))
+        draw_risk = max(draw_rate, draw_pressure, low_goal_pressure)
         strength_gap = match.home_recent5_opponent_strength - match.away_recent5_opponent_strength
 
-        over05 = max(float(probabilities.over_05), goal_floor * 0.92)
-        over15 = max(float(probabilities.over_15), goal_floor * 0.75)
+        over05 = clamp(max(float(probabilities.over_05), goal_floor * 0.92), 0.35)
+        over15 = clamp(max(float(probabilities.over_15), goal_floor * 0.75), 0.30, 0.95)
         one_x = float(probabilities.double_chance_1x)
         x2 = float(probabilities.double_chance_x2)
+        home_plus_15 = float(probabilities.handicap_home_plus_15)
+        away_plus_15 = float(probabilities.handicap_away_plus_15)
 
         # If one side has clearly stronger recent-opponent profile, tilt the double chance.
         if strength_gap > 0.08:
@@ -1859,45 +1874,122 @@ class PicksService:
         elif strength_gap < -0.08:
             x2 = min(0.99, x2 + 0.04)
 
-        # Balanced H2H + both teams scoring often => totals are safer than side coverage.
-        if h2h_balance > 0.72 and goal_floor > 0.65:
-            over15 = min(0.95, over15 + 0.03)
+        # Balanced + low-scoring fixtures should avoid over-forcing totals.
+        if draw_risk >= 0.55:
+            over15 -= 0.07
+            over05 -= 0.03
+            one_x += 0.03
+            x2 += 0.03
+            home_plus_15 += 0.02
+            away_plus_15 += 0.02
+        elif draw_risk >= 0.45:
+            over15 -= 0.04
+            one_x += 0.015
+            x2 += 0.015
 
-        safe_candidates = [
+        over05 = clamp(over05, 0.35)
+        over15 = clamp(over15, 0.30, 0.95)
+        one_x = clamp(one_x, 0.35)
+        x2 = clamp(x2, 0.35)
+        home_plus_15 = clamp(home_plus_15, 0.35)
+        away_plus_15 = clamp(away_plus_15, 0.35)
+
+        decision_market = (decision.market or '').upper()
+        decision_selection = (decision.selection or '').upper()
+        should_replace_total_goals = (
+            decision_market == 'TOTAL_GOALS'
+            and (
+                draw_risk >= 0.52
+                or (
+                    'OVER 1.5' in decision_selection
+                    and (goal_floor < 0.62 or draw_rate >= 0.34 or draw_pressure >= 0.50)
+                )
+            )
+        )
+        supported_handicap_lines = self._parse_handicap_lines(self._settings.soccer_supported_handicap_lines)
+
+        if should_replace_total_goals:
+            replacement_candidates: list[tuple[str, str, float, str]] = [
+                (
+                    'DOUBLE_CHANCE',
+                    '1X',
+                    one_x,
+                    'Soccer guardrail replaced TOTAL_GOALS with 1X due to draw/low-goal risk profile.',
+                ),
+                (
+                    'DOUBLE_CHANCE',
+                    'X2',
+                    x2,
+                    'Soccer guardrail replaced TOTAL_GOALS with X2 due to draw/low-goal risk profile.',
+                ),
+            ]
+            if 1.5 in supported_handicap_lines:
+                replacement_candidates.extend(
+                    [
+                        (
+                            'HANDICAP',
+                            'Home +1.5',
+                            home_plus_15,
+                            'Soccer guardrail replaced TOTAL_GOALS with Home +1.5 for added downside protection.',
+                        ),
+                        (
+                            'HANDICAP',
+                            'Away +1.5',
+                            away_plus_15,
+                            'Soccer guardrail replaced TOTAL_GOALS with Away +1.5 for added downside protection.',
+                        ),
+                    ]
+                )
+            market, selection, confidence, rationale = max(replacement_candidates, key=lambda item: item[2])
+            return Decision(
+                market=market,
+                selection=selection,
+                confidence=round(confidence, 4),
+                implied_odds=self._safe_odds_from_confidence(confidence),
+                rationale=rationale,
+            )
+
+        if decision_market != 'HANDICAP':
+            return decision
+        # Keep handicap decisions when confidence is reasonably strong; only
+        # fallback when the protection signal is weak.
+        if decision.confidence >= 0.75:
+            return decision
+
+        safe_candidates: list[tuple[str, str, float, str]] = [
             (
                 'TOTAL_GOALS',
                 'Over 0.5',
-                max(0.35, min(0.99, over05)),
+                over05,
                 'Soccer safe-market guardrail replaced handicap with goals floor.',
             ),
             (
                 'TOTAL_GOALS',
                 'Over 1.5',
-                max(0.30, min(0.95, over15)),
+                over15,
                 'Soccer safe-market guardrail replaced handicap with goals envelope.',
             ),
             (
                 'DOUBLE_CHANCE',
                 '1X',
-                max(0.35, min(0.99, one_x)),
+                one_x,
                 'Soccer safe-market guardrail replaced handicap with double chance coverage.',
             ),
             (
                 'DOUBLE_CHANCE',
                 'X2',
-                max(0.35, min(0.99, x2)),
+                x2,
                 'Soccer safe-market guardrail replaced handicap with double chance coverage.',
             ),
         ]
 
-        # In less goal-open and side-leaning matchups, avoid always forcing
-        # totals and allow double-chance to win ties.
-        if goal_floor < 0.62 and h2h_balance < 0.6:
+        # In draw/low-goal profiles, bias ties toward double-chance outcomes.
+        if draw_risk >= 0.50:
             safe_candidates = [
                 (
                     market,
                     selection,
-                    confidence + (0.015 if market == 'DOUBLE_CHANCE' else 0.0),
+                    confidence + (0.02 if market == 'DOUBLE_CHANCE' else -0.01),
                     rationale,
                 )
                 for market, selection, confidence, rationale in safe_candidates
@@ -2261,14 +2353,25 @@ class PicksService:
 
         if sport == Sport.SOCCER:
             safe_bonus = sum(
-                0.01
+                (
+                    0.008
+                    if (pick.market.upper(), pick.selection.upper()) == ('TOTAL_GOALS', 'OVER 0.5')
+                    else 0.0
+                )
+                + (
+                    -0.012
+                    if (pick.market.upper(), pick.selection.upper()) == ('TOTAL_GOALS', 'OVER 1.5')
+                    else 0.0
+                )
+                + (
+                    0.02
+                    if (pick.market.upper(), pick.selection.upper()) in {
+                        ('DOUBLE_CHANCE', '1X'),
+                        ('DOUBLE_CHANCE', 'X2'),
+                    }
+                    else 0.0
+                )
                 for pick in picks
-                if (pick.market.upper(), pick.selection.upper()) in {
-                    ('TOTAL_GOALS', 'OVER 0.5'),
-                    ('TOTAL_GOALS', 'OVER 1.5'),
-                    ('DOUBLE_CHANCE', '1X'),
-                    ('DOUBLE_CHANCE', 'X2'),
-                }
             )
             handicap_conf_bonus = sum(
                 0.03
@@ -2280,7 +2383,7 @@ class PicksService:
             has_totals_or_dc = any(pick.market.upper() in {'TOTAL_GOALS', 'DOUBLE_CHANCE'} for pick in picks)
             handicap_mix_bonus = 0.025 if has_handicap and has_totals_or_dc else 0.0
             total_goals_count = market_counts.get('TOTAL_GOALS', 0)
-            repetitive_totals_penalty = max(0, total_goals_count - 1) * 0.05
+            repetitive_totals_penalty = max(0, total_goals_count - 1) * 0.07
             safe_bonus = (
                 safe_bonus
                 + handicap_conf_bonus
